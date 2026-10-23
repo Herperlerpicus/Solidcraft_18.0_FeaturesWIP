@@ -304,7 +304,8 @@ pub struct UiState {
     pub locked_bodies: Vec<String>,
     /// The agent cursor: shown, speed, follow camera (#35).
     pub agent_cursor: agent_cursor::Settings,
-    /// The running tool's icon rides beside the pointer in the viewport (View settings).
+    /// The running tool's icon rides beside the pointer in the viewport (View settings; off by
+    /// default).
     pub tool_cursor: bool,
 }
 
@@ -332,7 +333,7 @@ impl Default for UiState {
             shown_dims: Vec::new(),
             locked_bodies: Vec::new(),
             agent_cursor: Default::default(),
-            tool_cursor: true,
+            tool_cursor: false,
         }
     }
 }

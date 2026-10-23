@@ -3,8 +3,8 @@
 //! coordinate readout below it), so the user sees which command the
 //! next click goes to without looking up at the ribbon. It shows only while the pointer is over
 //! the model itself (not over a panel, a dialog or a menu) and hides while the camera moves.
-//! On by default; View settings ("Show tool at cursor") or `ui.set {"toolCursor": false}` turn
-//! it off.
+//! Off by default; View settings ("Show tool at cursor") or `ui.set {"toolCursor": true}` turn
+//! it on.
 //! It is UI only: drawing it runs no command and changes nothing in the design.
 
 use egui::{Pos2, Rect, Stroke, Vec2, pos2, vec2};
@@ -89,6 +89,20 @@ mod tests {
     fn badge_shows_the_running_tool_beside_the_pointer() {
         let mut h = Harness::new();
         h.settle();
+        // Off by default: a running tool shows no badge until View settings turn it on.
+        assert!(!h.app.ui.tool_cursor, "the badge is on by default");
+        h.step(&json!({"start": "sketch.create"})).unwrap();
+        let (_, badge) = hover_middle(&mut h);
+        assert!(badge.is_none(), "off by default, yet a badge is drawn at {badge:?}");
+        h.step(&json!({"key": "Escape"})).unwrap();
+        h.settle();
+        // Turned on with the checkbox in the navigation bar's View settings.
+        h.step(&json!({"click": {"handle": "nav:view"}})).unwrap();
+        h.frames(2);
+        h.step(&json!({"click": {"handle": "view:tool_cursor"}})).unwrap();
+        h.step(&json!({"click": {"handle": "nav:view"}})).unwrap();
+        h.frames(2);
+        assert!(h.app.ui.tool_cursor, "the View settings checkbox did not turn the badge on");
         let (_, badge) = hover_middle(&mut h);
         assert!(badge.is_none(), "no tool runs, yet a badge is drawn at {badge:?}");
 
