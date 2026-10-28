@@ -228,7 +228,7 @@ impl HistoryTransport {
         let response = ui.interact(rect, ui.id().with(("history_transport", self.id())), egui::Sense::click());
         crate::scenario::publish_target(&format!("history:{}", self.id()), rect);
         if response.hovered() {
-            ui.painter().rect_filled(rect, t.radius_sm, t.hover);
+            t.paint_highlight(ui.painter(), rect, t.radius_sm, t.hover);
         }
         icons::glyphs::transport_glyph(ui.painter(), rect.center(), self.id(), t.icon);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.label()));

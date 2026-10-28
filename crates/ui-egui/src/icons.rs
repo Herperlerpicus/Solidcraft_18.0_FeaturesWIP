@@ -36,7 +36,12 @@ struct Cache(Arc<Mutex<CacheEntries>>);
 struct CacheEntries {
     palette: Option<icon_svg::Palette>,
     textures: HashMap<(&'static str, Look, u32, Finish), TextureHandle>,
+    /// A theme pack's drawings (`theme_layout`), by their content key.
+    packs: HashMap<(u64, Look, u32, Finish), TextureHandle>,
 }
+
+/// Pack textures kept at most; past it they are drawn again (a run of theme changes).
+const MAX_PACK_TEXTURES: usize = 2048;
 
 /// Draw palette-owned icon artwork with an explicit opacity (0 to 1).
 pub fn paint_icon(p: &Painter, r: Rect, name: &str, opacity: f32) {
@@ -80,7 +85,22 @@ fn paint_with_ink(p: &Painter, r: Rect, name: &str, dark: Option<bool>, opacity:
     let ctx = p.ctx();
     let resolved = icon_svg::resolve(name);
     let look = Look::themed(dark.unwrap_or_else(|| ctx.global_style().visuals.dark_mode), resolved.accent, crate::theme::vision());
-    paint_resolved(p, r, resolved, look, opacity, ink.map_or(Finish::Artwork, Finish::Ink), mirror);
+    paint_resolved(p, r, name, resolved, look, opacity, ink.map_or(Finish::Artwork, Finish::Ink), mirror);
+}
+
+/// A command icon on a ribbon tab or its drop-downs. With icons following their tab's colour
+/// (Preferences, `TabAccent::tab_icons`), it takes the active tab's ramp, unless its own colour
+/// carries a meaning (constraints, construction); otherwise it keeps its own colour.
+pub(crate) fn paint_on_tab(p: &Painter, r: Rect, name: &str, opacity: f32) {
+    match crate::theme::TabAccent::tab_icons(p.ctx()) {
+        Some((ramp, palette)) if !icon_svg::keeps_its_colour(name) => {
+            let resolved = icon_svg::resolve(name);
+            let mut look = Look::themed(p.ctx().global_style().visuals.dark_mode, ramp.and_then(icon_svg::accent_index), crate::theme::vision());
+            look.palette = Some(palette);
+            paint_resolved(p, r, name, resolved, look, opacity, Finish::Artwork, Mirror::None);
+        }
+        _ => paint_icon(p, r, name, opacity),
+    }
 }
 
 /// Draw with a named palette ramp, preserving outlines, passive faces and transparency.
@@ -93,7 +113,7 @@ pub fn paint_accented(p: &Painter, r: Rect, name: &str, accent: Option<&str>, op
         None => None,
     };
     let look = Look::themed(p.ctx().global_style().visuals.dark_mode, accent, crate::theme::vision());
-    paint_resolved(p, r, resolved, look, opacity, Finish::Artwork, Mirror::None);
+    paint_resolved(p, r, name, resolved, look, opacity, Finish::Artwork, Mirror::None);
 }
 
 /// Shared destructive-action artwork: red shaded faces, normal outlines and cutouts.
@@ -102,10 +122,11 @@ pub fn paint_accented(p: &Painter, r: Rect, name: &str, accent: Option<&str>, op
 pub(crate) fn paint_danger(p: &Painter, r: Rect, name: &str, opacity: f32) {
     let resolved = icon_svg::resolve(name);
     let look = Look::themed(p.ctx().global_style().visuals.dark_mode, icon_svg::accent_index("constraint"), crate::theme::vision());
-    paint_resolved(p, r, resolved, look, opacity, Finish::Danger, Mirror::None);
+    paint_resolved(p, r, name, resolved, look, opacity, Finish::Danger, Mirror::None);
 }
 
-fn paint_resolved(p: &Painter, r: Rect, resolved: icon_svg::Resolved, look: Look, opacity: f32, finish: Finish, mirror: Mirror) {
+/// Draw the icon `name`: the theme pack's own drawing of it (`theme_layout`), else its master.
+fn paint_resolved(p: &Painter, r: Rect, name: &str, resolved: icon_svg::Resolved, look: Look, opacity: f32, finish: Finish, mirror: Mirror) {
     let ctx = p.ctx();
     let ppp = ctx.pixels_per_point().max(0.5);
     let side = r.width().min(r.height());
@@ -115,23 +136,33 @@ fn paint_resolved(p: &Painter, r: Rect, resolved: icon_svg::Resolved, look: Look
     let palette = crate::theme::Tokens::get().icon_palette;
     if entries.palette != palette {
         entries.textures.clear();
+        entries.packs.clear();
         entries.palette = palette;
     }
-    let map = &mut entries.textures;
-    let key = (resolved.master, look, px, finish);
-    if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(key) {
-        let Some(doc) = icon_svg::doc_for(resolved.master, px) else { return };
-        let pm = if finish == Finish::Danger { icon_svg::render_tinted(doc, look, px) } else { icon_svg::render(doc, look, px) };
-        let Some(pm) = pm else { return };
-        let mut image = egui::ColorImage::from_rgba_premultiplied([px as usize, px as usize], pm.data());
-        if let Finish::Ink(ink) = finish {
-            for pixel in &mut image.pixels {
-                *pixel = ink.gamma_multiply(f32::from(pixel.a()) / 255.0);
+    use std::collections::hash_map::Entry;
+    let tex = match crate::theme_layout::pack(name) {
+        Some(pack) => {
+            if entries.packs.len() >= MAX_PACK_TEXTURES {
+                entries.packs.clear();
+            }
+            match entries.packs.entry((pack.key, look, px, finish)) {
+                Entry::Occupied(slot) => slot.get().clone(),
+                Entry::Vacant(slot) => {
+                    let Some(tex) = rasterise(ctx, &pack.doc, look, px, finish, format!("icon:pack:{name}:{px}")) else { return };
+                    slot.insert(tex).clone()
+                }
             }
         }
-        slot.insert(ctx.load_texture(format!("icon:{}:{px}", resolved.master), image, TextureOptions::LINEAR));
-    }
-    let Some(tex) = map.get(&key) else { return };
+        None => match entries.textures.entry((resolved.master, look, px, finish)) {
+            Entry::Occupied(slot) => slot.get().clone(),
+            Entry::Vacant(slot) => {
+                let Some(doc) = icon_svg::doc_for(resolved.master, px) else { return };
+                let Some(tex) = rasterise(ctx, doc, look, px, finish, format!("icon:{}:{px}", resolved.master)) else { return };
+                slot.insert(tex).clone()
+            }
+        },
+    };
+    drop(entries);
     // Snap the image to whole physical pixels so it stays crisp.
     let size = px as f32 / ppp;
     let min = pos2(((r.center().x - size / 2.0) * ppp).round() / ppp, ((r.center().y - size / 2.0) * ppp).round() / ppp);
@@ -142,6 +173,18 @@ fn paint_resolved(p: &Painter, r: Rect, resolved: icon_svg::Resolved, look: Look
         Mirror::Horizontal => Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)),
     };
     p.image(tex.id(), Rect::from_min_size(min, egui::vec2(size, size)), uv, tint);
+}
+
+/// An icon drawing rasterised at `px` pixels in its look and finish, as a texture.
+fn rasterise(ctx: &egui::Context, doc: &icon_svg::Doc, look: Look, px: u32, finish: Finish, name: String) -> Option<TextureHandle> {
+    let pm = if finish == Finish::Danger { icon_svg::render_tinted(doc, look, px) } else { icon_svg::render(doc, look, px) }?;
+    let mut image = egui::ColorImage::from_rgba_premultiplied([px as usize, px as usize], pm.data());
+    if let Finish::Ink(ink) = finish {
+        for pixel in &mut image.pixels {
+            *pixel = ink.gamma_multiply(f32::from(pixel.a()) / 255.0);
+        }
+    }
+    Some(ctx.load_texture(name, image, TextureOptions::LINEAR))
 }
 
 #[cfg(test)]
@@ -203,6 +246,33 @@ mod tests {
             );
             steady.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn a_theme_pack_draws_its_own_icon_coloured_by_the_palette() {
+        let ctx = crate::fonts::test_context();
+        ctx.set_visuals(egui::Visuals::light());
+        // A square in the medium result colour, where the extrude master's cube leaves its corner empty.
+        let square = r##"<svg viewBox="0 0 64 64"><path d="M4 4 L60 4 L60 60 L4 60 Z" fill="#328bd3"/></svg>"##;
+        let layout = [("icons".to_string(), serde_json::json!({"pack": {"extrude": square}}))].into_iter().collect();
+        let corner = |ctx: &egui::Context| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_icon(ui.painter(), Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0)), "extrude", 1.0);
+            });
+            let pixel = out.textures_delta.set.values().flat_map(|deltas| deltas.iter()).find_map(|d| match &d.image {
+                egui::ImageData::Color(image) if image.size == [64, 64] => image.pixels.get(5 * 64 + 5).copied(),
+                _ => None,
+            });
+            out.textures_delta.clear();
+            pixel
+        };
+        crate::theme_layout::set_current(Some(&layout));
+        let look = Look::themed(false, icon_svg::resolve("extrude").accent, crate::theme::vision());
+        let expected = icon_svg::role_colour("active-2", look);
+        let pack = corner(&ctx).expect("the pack's texture");
+        assert_eq!((pack.a(), [pack.r(), pack.g(), pack.b()]), (255, [expected.r(), expected.g(), expected.b()]), "palette colours apply");
+        crate::theme_layout::set_current(None);
+        assert_eq!(corner(&ctx).map(|p| p.a()), Some(0), "without the pack, the master again");
     }
 
     #[test]

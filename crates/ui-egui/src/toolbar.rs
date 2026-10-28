@@ -307,6 +307,11 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
     let frame = Container::new(ui.ctx(), Surface::ApplicationBar).edge_frame(t.app_bar);
     app_bar.exact_size(APP_BAR_HEIGHT).show_separator_line(false).frame(frame).show(ui, |ui| {
         let r = ui.max_rect();
+        // A glass theme's title bar is glass too: its sheen, behind the bar's contents.
+        if let Some(glass) = t.borders.glass {
+            glass.paint_sheen(ui.painter(), r, 0u8);
+            glass.paint_streaks(ui.painter(), r);
+        }
         // The bar is the window's title bar: its empty space moves the window.
         if app.custom_titlebar || app.integrated_titlebar {
             crate::titlebar::drag_area(ui, r);
@@ -340,10 +345,14 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         // Compatibility for scenarios that used the former Home tab.
         crate::scenario::publish_target_as("tab:home", "titlebar:home", home);
         crate::scenario::publish_rect("appbar:home", home);
-        if idle && (home_response.hovered() || home_response.has_focus()) {
+        let bubble = t.bubble(ui.painter(), home.shrink(3.0), t.accent, crate::theme::Bubble::of(&home_response, idle, false));
+        if bubble.is_none() && idle && (home_response.hovered() || home_response.has_focus()) {
             ui.painter().rect_filled(home.shrink(3.0), t.radius_sm, t.app_bar_hover_button);
         }
         icons::paint_app_bar(ui.painter(), home.shrink(7.0), "home", if idle { 1.0 } else { 0.35 });
+        if let Some(bubble) = bubble {
+            bubble.finish(ui.painter());
+        }
         if home_response.on_hover_text(home_tip).clicked() && idle {
             app.home.show(app.session.revision);
         }
@@ -364,7 +373,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             crate::scenario::publish_target_as("appbar:folder", "appbar:file", br);
             let open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("sc_file_menu")).unwrap_or(false));
             if idle && (resp.hovered() || resp.has_focus() || open) {
-                ui.painter().rect_filled(br, t.radius_sm, t.app_bar_hover);
+                t.paint_highlight(ui.painter(), br, t.radius_sm, t.app_bar_hover);
             }
             let ink = if idle { t.app_bar_text } else { t.app_bar_text.gamma_multiply(0.35) };
             ui.painter().galley(pos2(br.left() + 8.0, br.center().y - galley.size().y / 2.0), galley, ink);
@@ -379,10 +388,14 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
             crate::scenario::publish_target(&format!("appbar:{icon}"), br);
             crate::scenario::publish_target(&format!("titlebar:{icon}"), br);
-            if enabled && (resp.hovered() || resp.has_focus()) {
+            let bubble = t.bubble(ui.painter(), br.shrink(3.0), t.accent, crate::theme::Bubble::of(&resp, enabled, false));
+            if bubble.is_none() && enabled && (resp.hovered() || resp.has_focus()) {
                 ui.painter().rect_filled(br.shrink(3.0), t.radius_sm, t.app_bar_hover_button);
             }
             icons::paint_app_bar(ui.painter(), Rect::from_center_size(br.center(), vec2(18.0, 18.0)), icon, if enabled { 1.0 } else { 0.35 });
+            if let Some(bubble) = bubble {
+                bubble.finish(ui.painter());
+            }
             let clicked = resp.on_hover_text(tip).clicked();
             enabled && clicked
         };
@@ -471,10 +484,14 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         // Settings sits immediately left of Help (also Ctrl+,).
         let gear = Rect::from_center_size(pos2(report.left() - 52.0, r.center().y), vec2(32.0, 32.0));
         let gresp = ui.interact(gear, ui.id().with("sc_prefs_button"), Sense::click());
-        if gresp.hovered() || gresp.has_focus() {
+        let bubble = t.bubble(ui.painter(), gear.shrink(3.0), t.accent, crate::theme::Bubble::of(&gresp, true, false));
+        if bubble.is_none() && (gresp.hovered() || gresp.has_focus()) {
             ui.painter().rect_filled(gear.shrink(3.0), t.radius_sm, t.app_bar_hover_button);
         }
         icons::paint_app_bar(ui.painter(), gear.shrink(7.0), "settings", 1.0);
+        if let Some(bubble) = bubble {
+            bubble.finish(ui.painter());
+        }
         crate::scenario::publish_rect("titlebar:preferences", gear);
         if crate::agent_chat::app_bar_button_shown(app) {
             assistant_button(app, ui, Rect::from_center_size(pos2(report.left() - 86.0, r.center().y), vec2(32.0, 32.0)));
@@ -1141,8 +1158,29 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) {
                     let response = ui.interact(tr, ui.id().with(("tab", tab)), Sense::click());
                     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, ribbon_label(app, tab)));
                     let style = ribbon_tab_style(&t, tab, contextual, active, response.hovered());
-                    ui.painter().rect(tr, corner, style.fill, Stroke::new(1.0, style.outline), egui::StrokeKind::Inside);
-                    ribbon_text(ui, tr.center(), &ribbon_label(app, tab), t.font_button, style.ink, active || contextual);
+                    if let Some(glass) = t.borders.glass {
+                        // Glass tabs, as a settings page's navigation: the active tab a glass tile
+                        // in its own colour with a short embossed pill under its name, a hovered
+                        // one a fainter tile; a contextual tab keeps its outline when idle.
+                        let accent = crate::theme::TabAccent::for_tab(&t, tab);
+                        if active || response.hovered() {
+                            let state = if active { crate::theme::Bubble::Hover } else { crate::theme::Bubble::Rest };
+                            glass.paint_tile(ui.painter(), tr, egui::CornerRadius::same(corner), accent.color, state);
+                        } else if contextual {
+                            ui.painter().rect_stroke(tr, corner, Stroke::new(1.0, accent.color), egui::StrokeKind::Inside);
+                        }
+                        let ink = if active { accent.ink } else { t.text };
+                        let lift = if active { 1.5 } else { 0.0 };
+                        ribbon_text(ui, tr.center() - vec2(0.0, lift), &ribbon_label(app, tab), t.font_button, ink, active || contextual);
+                        if active {
+                            let pill =
+                                Rect::from_center_size(pos2(tr.center().x, tr.bottom() - 3.5), vec2((tr.width() * 0.3).clamp(12.0, 22.0), 3.0));
+                            glass.paint_emboss(ui.painter(), pill, accent.color);
+                        }
+                    } else {
+                        ui.painter().rect(tr, corner, style.fill, Stroke::new(1.0, style.outline), egui::StrokeKind::Inside);
+                        ribbon_text(ui, tr.center(), &ribbon_label(app, tab), t.font_button, style.ink, active || contextual);
+                    }
                     if ui.clip_rect().contains(tr.center()) {
                         crate::scenario::publish_target(&format!("tab:{tab}"), tr);
                         crate::scenario::publish_rect(&format!("toolbar_tab:{tab}"), tr);
@@ -1163,7 +1201,9 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) {
                 }
             });
     });
-    if matches!(app.ui.tab.as_str(), "SKETCH" | "SHEET METAL") {
+    if t.borders.glass.is_some() {
+        // Glass tabs mark the active tab themselves; no line under the row.
+    } else if matches!(app.ui.tab.as_str(), "SKETCH" | "SHEET METAL") {
         ui.painter().line_segment(
             [row.left_bottom() - vec2(0.0, 1.0), row.right_bottom() - vec2(0.0, 1.0)],
             Stroke::new(2.0, panel_accent(&t, &app.ui.tab, "")),
@@ -1219,7 +1259,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let fill =
                     if crate::render_workspace::active(app) && card == ws { crate::theme::TabAccent::current(ui.ctx()).soft } else { t.toolbar };
                 let frame = host.frame(ui.ctx(), fill, crate::frame::Side::Left);
-                ui.painter().add(frame.paint(card));
+                ui.painter().add(Container::painted(ui.painter(), frame, card));
                 // Blank card space owns clicks as well as its buttons.
                 ui.interact(card, ui.id().with(("shell_card", card.left().to_bits())), Sense::click_and_drag());
             }
@@ -1239,7 +1279,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let wresp = ui.interact(ws, ui.id().with("workspace_switcher"), Sense::click());
         let open = app.viewport.context_menu.is_some() && app.menu.target == crate::context_menu::Target::Workspace;
         if wresp.hovered() || open {
-            painter.rect_filled(ws, if floating { t.radius_lg } else { 0 }, t.hover);
+            t.paint_highlight(&painter, ws, if floating { t.radius_lg } else { 0 }, t.hover);
         }
         // Keep the accent straight while leaving the floating card's top corners round.
         let accent_inset = if crate::render_workspace::active(app) {
@@ -1422,11 +1462,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let br = Rect::from_center_size(free.center(), vec2((width - 8.0).max(0.0), button_height));
                 crate::scenario::publish_handle(&format!("collapsed:{tab}:{panel}"), br.center());
                 if fresp.hovered() && enabled_panel {
-                    painter.rect_filled(br, t.radius_sm, t.hover);
+                    t.paint_highlight(&painter, br, t.radius_sm, t.hover);
                 }
                 if let Some(c) = shown.first().or(cmds.first()) {
                     let info = c.info(&app.session);
-                    icons::paint_icon(
+                    icons::paint_on_tab(
                         &painter,
                         Rect::from_center_size(br.center() - vec2(0.0, 3.0), vec2(26.0, 26.0)),
                         info.icon,
@@ -1483,21 +1523,57 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 }
                 let accent = crate::theme::TabAccent::for_tab(&t, &tab);
                 let family_open = family.is_some_and(|f| egui::Popup::is_id_open(ui.ctx(), ui.id().with(("family", f.label)).with("popup")));
-                if !finish
+                let on = !finish
                     && (resp.is_pointer_button_down_on()
                         || running.as_deref() == Some(selected.id)
                         || family_open
-                        || (selected.id == "view.shots_strip" && app.preferences.render_shots_strip))
-                {
-                    painter.rect(whole, t.radius_sm, accent.soft, Stroke::new(1.0, accent.color), egui::StrokeKind::Inside);
-                } else if resp.hovered() && info.enabled {
-                    painter.rect_filled(whole, t.radius_sm, t.hover);
-                }
+                        || (selected.id == "view.shots_strip" && app.preferences.render_shots_strip));
                 let icon = if selected.id == "sketch.finish" { "finish" } else { info.icon };
                 let side = if finish { 30.0 } else { 26.0 };
-                let icon_rect =
-                    Rect::from_center_size(pos2(br.center().x, whole.top() + if labels { 16.0 } else { button_height / 2.0 }), vec2(side, side));
-                icons::paint_icon(&painter, icon_rect, icon, if info.enabled { 1.0 } else { 0.35 });
+                // The label, laid out first: one that wraps to two lines moves up so it stays inside
+                // the button (#8391).
+                let label = (labels && family.is_none()).then(|| {
+                    let button_label = crate::workspace::ribbon_button_label(selected);
+                    let label = app.tr_label(if button_label == selected.label { info.label } else { button_label });
+                    let color = if info.enabled { t.text } else { t.text_dim };
+                    ribbon_button_galley(&painter, label, whole.width() - BUTTON_LABEL_PADDING, color)
+                });
+                let label_y = label.as_ref().map_or(whole.top() + BUTTON_LABEL_TOP, |galley| ribbon_label_top(whole, galley.size().y));
+                // A theme's tiles, which frame the whole button, move its icon up with a raised
+                // label so both stay inside the tile; other themes keep the icon where it always was.
+                let tiles = t.borders.glass.and_then(|glass| glass.bubbles) == Some(crate::theme::BubbleShape::Square);
+                let icon_y = match labels {
+                    true if tiles => (whole.top() + 16.0).min(label_y - side * 0.5 - 1.0).max(whole.top() + side * 0.5 + 1.0),
+                    true => whole.top() + 16.0,
+                    false => whole.top() + button_height / 2.0,
+                };
+                let icon_rect = Rect::from_center_size(pos2(br.center().x, icon_y), vec2(side, side));
+                // A glass theme's bubble: a tile over the whole button (icon, label, a family's
+                // drop-down), nearly touching its neighbours; an orb around the icon. The whole
+                // tile lights up under the pointer, its drop-down part included.
+                let face = whole;
+                let bubble_rect = match t.borders.glass.and_then(|glass| glass.bubbles) {
+                    Some(crate::theme::BubbleShape::Square) => face.expand2(vec2(BUTTON_GAP * 0.5 - 0.5, 0.0)),
+                    _ => Rect::from_center_size(icon_rect.center(), egui::Vec2::splat((side + 12.0).min(whole.width() - 2.0))),
+                };
+                let pointer_on = info.enabled && ui.rect_contains_pointer(face);
+                let state = match crate::theme::Bubble::of(&resp, info.enabled, on) {
+                    crate::theme::Bubble::Rest if pointer_on => crate::theme::Bubble::Hover,
+                    state => state,
+                };
+                // The tile is the theme's own colour; the tab's shows in its icon's shaded faces.
+                let bubble = t.bubble(&painter, bubble_rect, t.accent, state);
+                if bubble.is_none() {
+                    if on {
+                        painter.rect(whole, t.radius_sm, accent.soft, Stroke::new(1.0, accent.color), egui::StrokeKind::Inside);
+                    } else if resp.hovered() && info.enabled {
+                        t.paint_highlight(&painter, whole, t.radius_sm, t.hover);
+                    }
+                }
+                icons::paint_on_tab(&painter, icon_rect, icon, if info.enabled { 1.0 } else { 0.35 });
+                if let Some(bubble) = bubble {
+                    bubble.finish(&painter);
+                }
                 let tr_label = app.tr_label(info.label).to_string();
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && info.enabled, &tr_label));
                 if ribbon_tooltip(app, resp, selected, info.disabled_reason.as_deref()).clicked() && info.enabled {
@@ -1505,15 +1581,19 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                     app.start_pinned(id, Some(whole));
                 }
                 if let Some(f) = family {
+                    // To the button's bottom, so the drop-down opens under the button.
                     let ar = if labels {
-                        Rect::from_min_max(pos2(whole.left(), whole.top() + 30.0), pos2(whole.right(), whole.top() + 48.0))
+                        Rect::from_min_max(
+                            pos2(whole.left(), whole.top() + 30.0),
+                            pos2(whole.right(), if tiles { face.bottom() } else { whole.top() + 48.0 }),
+                        )
                     } else {
                         Rect::from_min_max(pos2(br.right(), whole.top()), whole.right_bottom())
                     };
                     let arrow = ui.interact(ar, ui.id().with(("family", f.label)), Sense::click());
                     crate::scenario::publish_handle(&format!("family:{}", f.label), ar.center());
-                    if arrow.hovered() {
-                        painter.rect_filled(ar, t.radius_sm, t.hover);
+                    if arrow.hovered() && bubble.is_none() {
+                        t.paint_highlight(&painter, ar, t.radius_sm, t.hover);
                     }
                     // The title sits on the same line as the other buttons' labels.
                     if labels {
@@ -1531,12 +1611,8 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                         let width = dropdown_width(app, ui, &variants);
                         sketch_menu_rows(app, ui, &variants, width, &mut menu, &mut toggle);
                     });
-                } else if labels {
-                    let button_label = crate::workspace::ribbon_button_label(selected);
-                    let label = app.tr_label(if button_label == selected.label { info.label } else { button_label });
-                    let color = if info.enabled { t.text } else { t.text_dim };
-                    let galley = ribbon_button_galley(&painter, label, whole.width() - BUTTON_LABEL_PADDING, color);
-                    painter.galley(pos2(whole.center().x, ribbon_label_top(whole, galley.size().y)), galley, t.text);
+                } else if let Some(galley) = label {
+                    painter.galley(pos2(whole.center().x, label_y), galley, t.text);
                 }
             }
             if !collapsed && drawn > large.len() {
@@ -1574,7 +1650,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                         ),
                         egui::StrokeKind::Inside,
                     );
-                    icons::paint_icon(
+                    icons::paint_on_tab(
                         &painter,
                         Rect::from_center_size(cell.center(), vec2(15.0, 15.0)),
                         c.icon,
@@ -1615,7 +1691,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             let accent = crate::theme::TabAccent::for_tab(&t, &tab);
             let hot = lresp.hovered() && enabled_panel;
             if panel_open || hot {
-                painter.rect_filled(lr, t.radius_sm, if panel_open { accent.soft } else { t.hover });
+                t.paint_highlight(&painter, lr, t.radius_sm, if panel_open { accent.soft } else { t.hover });
             }
             let label = if finish { app.tr("ui.ribbon_exit").to_string() } else { ribbon_label(app, panel) };
             let font = if panel_open || hot {
@@ -1987,6 +2063,7 @@ fn dropdown_row(app: &SolveApp, ui: &mut egui::Ui, c: &'static solidcraft_engine
     crate::scenario::publish_handle(&format!("dropdown:{}", c.id), rect.center());
     let hot = info.enabled && (pointer_on || resp.has_focus());
     let mut row = crate::ui_kit::MenuItem::new(c.id, &label, info.icon);
+    row.on_tab = true;
     row.enabled = info.enabled;
     if c.id == "view.shots_strip" {
         row.checked = Some(app.preferences.render_shots_strip);

@@ -744,6 +744,7 @@ impl<'a> Panel<'a> {
     ) -> (bool, super::Action) {
         super::scope(ui, |ui| {
             let t = Tokens::get();
+            let glass = super::Container::begin_content(ui);
             let min = ui.cursor().min;
             let band = egui::Rect::from_min_size(min, vec2(ui.available_width(), super::header_height()));
             if heading.drag_key.is_empty() {
@@ -803,7 +804,7 @@ impl<'a> Panel<'a> {
             };
             if let Some(top) = &top {
                 let action = top.finish(ui, heading.icon, heading.title, &state, valid && !state.applying);
-                super::Container::finish_content(ui, self.positioned_frame(ui.ctx()));
+                super::Container::finish_content(ui, self.positioned_frame(ui.ctx()), glass);
                 return (close, action);
             }
             let corners = self.positioned_frame(ui.ctx()).corner_radius;
@@ -826,7 +827,7 @@ impl<'a> Panel<'a> {
                     }
                 },
             );
-            super::Container::finish_content(ui, self.positioned_frame(ui.ctx()));
+            super::Container::finish_content(ui, self.positioned_frame(ui.ctx()), glass);
             (close, action)
         })
     }
@@ -837,6 +838,7 @@ impl<'a> Panel<'a> {
         let t = Tokens::get();
         ui.set_max_height((bottom - ui.cursor().top()).max(0.0));
         super::scope(ui, |ui| {
+            let glass = super::Container::begin_content(ui);
             ui.spacing_mut().item_spacing.y = 0.0;
             let height = (bottom - top - self.frame.total_margin().sum().y).max(0.0);
             let short = height < t.space_24 * 6.0;
@@ -875,7 +877,7 @@ impl<'a> Panel<'a> {
             } else {
                 contents(ui);
             }
-            super::Container::finish_content(ui, self.positioned_frame(ui.ctx()));
+            super::Container::finish_content(ui, self.positioned_frame(ui.ctx()), glass);
         });
     }
 }
@@ -1111,9 +1113,10 @@ impl<'a> Window<'a> {
                 .backdrop_color(Tokens::get().tab_on_fill_dark.gamma_multiply(0.35))
                 .frame(frame)
                 .show(ctx, |ui| {
+                    let glass = super::Container::begin_content(ui);
                     ui.set_width(inner_width);
                     let result = add(ui);
-                    super::Container::finish_content(ui, frame);
+                    super::Container::finish_content(ui, frame, glass);
                     result
                 });
             scenario::publish_rect("dialog:window", shown.response.rect);
@@ -1138,8 +1141,9 @@ impl<'a> Window<'a> {
             (None, None) => window.pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center() - vec2(0.0, row_height() * 2.5)),
         };
         let shown = window.show(ctx, |ui| {
+            let glass = super::Container::begin_content(ui);
             let result = add(ui);
-            super::Container::finish_content(ui, frame);
+            super::Container::finish_content(ui, frame, glass);
             result
         });
         if let Some(shown) = &shown {

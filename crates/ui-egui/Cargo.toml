@@ -33,6 +33,9 @@ minisign-verify = "0.3"
 zip = { workspace = true }
 # Rasterises the icon SVGs (assets/icons/ui/design/svg) at the size they are drawn.
 tiny-skia = { workspace = true }
+# The local time of day, for colours that follow it (the browser's clock in the web app; MIT OR
+# Apache-2.0; already in the tree with these features through truck-stepio).
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 
 [target.'cfg(unix)'.dependencies]
 # Ends an agent's process group with the system call (MIT; already in the tree through zip).

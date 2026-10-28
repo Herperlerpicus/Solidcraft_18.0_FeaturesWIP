@@ -3946,16 +3946,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     let held = crate::select_other::track_hold(app, ui.ctx(), &proj, inside, primary_pressed, primary_down, hover, navigating_from_press);
     crate::select_other::hover_override(app);
     let painter = ui.painter_at(rect);
-    // Background gradient.
-    let (top, bot) = (t.viewport_top, t.viewport_bottom);
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.left_top(), top);
-    mesh.colored_vertex(rect.right_top(), top);
-    mesh.colored_vertex(rect.right_bottom(), bot);
-    mesh.colored_vertex(rect.left_bottom(), bot);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(Shape::mesh(mesh));
+    // The background: a gradient, a solid colour, a pattern or the user's picture (`backdrop`).
+    crate::backdrop::paint(&painter, rect, t.viewport_top, t.viewport_bottom, crate::backdrop::Place::View);
 
     // ---- model ----
     crate::frame_watch::step(app, "viewport before the model");

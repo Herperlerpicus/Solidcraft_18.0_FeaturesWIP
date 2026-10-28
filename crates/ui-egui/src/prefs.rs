@@ -913,9 +913,65 @@ preference_settings! {
     logo_accent: bool = false, PAGE_INTERFACE;
     /// Imported theme files (`theme_files`), kept here so they also work in the browser.
     custom_themes: Vec<crate::theme_files::ThemeFile> = Vec::new();
+    /// The theme whose `layout.preferences` were set last (`apply_theme_preferences`): they are
+    /// set once when it is turned on, not again at every start.
+    theme_applied: String = String::new();
+    /// The user's own values of the preferences that theme set, given back when it is turned off.
+    theme_saved: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
     /// Desktop: a `solidcraft-theme/1` file another tool writes, followed as the theme and
     /// reloaded when it changes (#7573). Empty (the default): no file is followed.
     theme_follow: String = String::new(), PAGE_INTERFACE;
+    /// The interface's base colour (`#rrggbb`) over the theme's own: it tints the title bar,
+    /// ribbon, panels and dialogs, keeping their text readable (`Tokens::personalised`). Empty
+    /// (the default): the theme's colours.
+    ui_color: String = String::new(), PAGE_INTERFACE;
+    /// How strongly `ui_color` tints the interface, 0 to 1.
+    ui_color_intensity: f32 = 0.5, PAGE_INTERFACE;
+    /// A glass theme's opacity (0.3 to 1) in place of its own; none (the default): the theme's.
+    glass_opacity: Option<f32> = None, PAGE_INTERFACE;
+    /// A glass theme's gloss, the strength of its sheen and glossy buttons (0 to 1), in place of
+    /// its own; none (the default): the theme's.
+    glass_gloss: Option<f32> = None, PAGE_INTERFACE;
+    /// A glass theme's menu and popup opacity (0.3 to 1) in place of its own; none (the
+    /// default): the theme's.
+    glass_menu_opacity: Option<f32> = None, PAGE_INTERFACE;
+    /// A glass theme's menu shadow (0: none, to 1: deep) in place of its own; none (the
+    /// default): the theme's.
+    glass_menu_shadow: Option<f32> = None, PAGE_INTERFACE;
+    /// How strong the halo and shadow behind text on a glass theme's glass are, so it reads over
+    /// what shows through (0: none, to 1: a strong glow).
+    glass_text_shadow: f32 = 0.5, PAGE_INTERFACE;
+    /// The user's own colour (`#rrggbb`) for ribbon tabs (`theme::COLOURED_TABS` ids: `MODEL`,
+    /// `ASSEMBLE`, `SKETCH`, …), over the theme's; a tab left out keeps the theme's.
+    tab_colors: std::collections::BTreeMap<String, String> = Default::default(), PAGE_INTERFACE;
+    /// Icons on a ribbon tab and its drop-downs follow the tab's colour, except those whose own
+    /// colour carries a meaning (constraints, construction). Off: each icon keeps its own.
+    tab_colored_icons: bool = false, PAGE_INTERFACE;
+    /// The 3D view's background gradient follows the active tab's colour, shifting gently when
+    /// another tab or workspace is opened: a gradient of it as light as the background's own.
+    tab_tint: bool = false, PAGE_INTERFACE;
+    /// The interface's colour follows the time of day (`theme::daylight`): it is the base colour,
+    /// in place of the user's, and the background gradient's, shifting through the day.
+    time_of_day: bool = false, PAGE_INTERFACE;
+    /// The 3D view's background gradient (`#rrggbb` top and bottom) in place of the theme's;
+    /// empty (the default): the theme's.
+    background_top: String = String::new(), PAGE_INTERFACE;
+    background_bottom: String = String::new(), PAGE_INTERFACE;
+    /// How far the background gradient goes from the theme's own towards the user's or the
+    /// active tab's colours, 0 to 1.
+    background_strength: f32 = 1.0, PAGE_INTERFACE;
+    /// Those colours take the lightness of the theme's own background, so strong ones don't
+    /// overpower it.
+    background_even: bool = true, PAGE_INTERFACE;
+    /// What the 3D view's background is: the gradient (the default), a solid colour (the top
+    /// one), a built-in pattern, or a picture of the user's (`backdrop`).
+    background_kind: crate::backdrop::Kind = Default::default(), PAGE_INTERFACE;
+    /// The built-in pattern (`backdrop::PATTERNS`) when the background is a pattern.
+    background_pattern: String = "aurora".into(), PAGE_INTERFACE;
+    /// The picture (a PNG or JPEG file) when the background is a picture.
+    background_image: String = String::new(), PAGE_INTERFACE;
+    /// The light streaks and the background's pattern drift gently with the pointer.
+    background_motion: bool = true, PAGE_INTERFACE;
     /// Interface language (a registered locale ID).
     language: String = "en".into(), 0;
     /// Shared workspace composition; system windows and popups retain their purpose.
@@ -1459,11 +1515,14 @@ fn theme_row(app: &mut SolveApp, ui: &mut egui::Ui) {
         select_theme(app, &id);
     }
     match action {
-        Some("import") => app.pick_open_for(&["json"], |app, path| {
+        Some("import") => app.pick_open_for(&["zip", "json"], |app, path| {
             let Some(path) = path else { return };
-            // Through `vfs`, like every other import: in the web app a picked file is there.
-            let text = solidcraft_engine::io::vfs::read_to_string(&path, crate::theme_files::MAX_BYTES).map_err(|e| e.to_string());
-            import_theme_text(app, text);
+            // Through `vfs`, like every other import: in the web app a picked file is there. A
+            // theme package (`.zip`) or a theme file.
+            let imported = solidcraft_engine::io::vfs::read(&path, crate::theme_files::MAX_PACKAGE_BYTES)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| install_theme_bytes(app, &bytes));
+            report_theme_import(app, imported);
         }),
         #[cfg(not(target_arch = "wasm32"))]
         Some("paste") => {
@@ -1475,15 +1534,25 @@ fn theme_row(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
         }
         Some("export") => {
+            // The theme on now shares the look you see, your own adjustments included; another
+            // tile exports as it comes.
             let system_dark = ui.ctx().system_theme().map_or(app.ui.dark, |theme| theme == egui::Theme::Dark);
-            let file = theme_file(app, action_theme.as_deref().unwrap_or(&app.preferences.theme), system_dark);
+            let file = match action_theme.as_deref() {
+                Some(id) if id != app.preferences.theme => theme_file(app, id, system_dark),
+                _ => current_theme_file(app),
+            };
             let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("Theme").to_string();
-            let text = serde_json::to_string_pretty(&file).unwrap_or_default();
-            app.pick_save(&format!("{name}.json"), &["json"], move |app, path| {
+            // A theme package (`.zip`, its icon pack as SVG files) to share and install; a theme
+            // file (`.json`) when that is the name chosen.
+            app.pick_save(&format!("{name}.zip"), &["zip", "json"], move |app, path| {
+                let Some(path) = path else { return };
+                let bytes = if path.to_ascii_lowercase().ends_with(".json") {
+                    serde_json::to_string_pretty(&file).map(String::into_bytes).map_err(|e| e.to_string())
+                } else {
+                    crate::theme_files::package(&file)
+                };
                 // Through `vfs`, like every other save: the web app hands it out as a download.
-                if let Some(path) = path
-                    && let Err(e) = solidcraft_engine::io::vfs::write(&path, text.as_bytes())
-                {
+                if let Err(e) = bytes.and_then(|bytes| solidcraft_engine::io::vfs::write(&path, &bytes).map_err(|e| e.to_string())) {
                     app.set_status(format!("Theme export: {e}"), true);
                 }
             });
@@ -1641,13 +1710,86 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
     if let Some(f) = file {
         app.ui.dark = f.base.is_dark();
     }
-    let custom = file.map(|f| crate::theme::Custom { dark: f.base.is_dark(), tokens: crate::theme_files::resolve(f) });
+    // The user's own base colour and glass over the theme (Preferences › Interface).
+    let personal = personal(&app.preferences);
+    let base = match file {
+        Some(f) => Some((f.base.is_dark(), crate::theme_files::resolve(f))),
+        None if !personal.is_empty() || app.preferences.tab_tint || app.preferences.time_of_day => {
+            Some((app.ui.dark, if app.ui.dark { Tokens::dark() } else { Tokens::light() }))
+        }
+        None => None,
+    };
+    let custom = base.map(|(dark, tokens)| {
+        let mut personal = personal;
+        // Following the time of day, the day's colour is the base colour and the background's,
+        // shifting through the day; the page is drawn again each minute to follow it.
+        if app.preferences.time_of_day {
+            let day = crate::theme::shifting(ctx, "sc_daylight", crate::theme::daylight(local_hours()), DAYLIGHT_SECONDS);
+            personal.color = Some(day);
+            let [top, bottom] = personal.sky.unwrap_or([tokens.viewport_top, tokens.viewport_bottom]);
+            personal.sky = Some([top.lerp_to_gamma(day, 0.6), bottom.lerp_to_gamma(day, 0.25)]);
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
+        }
+        // Following the active tab, the background is a gradient of its colour, as light as the
+        // background's own (the user's, the day's, or the theme's), shifting gently between tabs.
+        // The rest of the interface keeps its colours.
+        if app.preferences.tab_tint {
+            let tab = tab_tint_now(ctx, crate::theme::TabAccent::for_tab(&tokens, &app.ui.tab).color);
+            let [top, bottom] = personal.sky.unwrap_or([tokens.viewport_top, tokens.viewport_bottom]);
+            personal.sky = Some([top.lerp_to_gamma(tab, 0.5), bottom.lerp_to_gamma(tab, 0.18)]);
+        }
+        // How strong the user's or the tab's background is: evened out to the theme's own
+        // lightness, and only so far from the theme's own as the strength says.
+        if let Some(sky) = personal.sky.as_mut() {
+            let strength = app.preferences.background_strength.clamp(0.0, 1.0);
+            for (color, own) in sky.iter_mut().zip([tokens.viewport_top, tokens.viewport_bottom]) {
+                let target = if app.preferences.background_even { crate::theme::with_lightness_of(*color, own) } else { *color };
+                *color = own.lerp_to_gamma(target, strength);
+            }
+        }
+        crate::theme::Custom { dark, tokens: tokens.personalised(personal) }
+    });
     if crate::theme::set_custom(custom) {
         app.styled = false;
     }
     if crate::theme::set_logo_accent(app.preferences.logo_accent) {
         app.styled = false;
     }
+    // What the theme arranges besides its colours (`theme_layout`).
+    crate::theme_layout::set_current(file.map(|f| &f.layout));
+    crate::theme::set_screen(ctx.content_rect());
+    // The light follows the pointer, smoothed so it drifts after it; it settles in the middle
+    // when the pointer leaves the window. Only something drawn with it (a glass theme's streaks,
+    // a pattern background) moves it: otherwise it stays still and asks for no repaints.
+    let moves = app.preferences.background_motion
+        && (Tokens::get().borders.glass.is_some() || app.preferences.background_kind == crate::backdrop::Kind::Pattern);
+    let light = if moves {
+        let screen = ctx.content_rect();
+        let target = ctx
+            .input(|i| i.pointer.latest_pos())
+            .filter(|_| screen.width() > 0.0 && screen.height() > 0.0)
+            .map_or(egui::Vec2::ZERO, |p| (p - screen.center()) / (screen.size() * 0.5));
+        egui::vec2(
+            ctx.animate_value_with_time(egui::Id::new("sc_light_x"), target.x, LIGHT_SECONDS),
+            ctx.animate_value_with_time(egui::Id::new("sc_light_y"), target.y, LIGHT_SECONDS),
+        )
+    } else {
+        egui::Vec2::ZERO
+    };
+    crate::theme::set_light(light);
+    crate::theme::set_text_shadow(app.preferences.glass_text_shadow);
+    crate::backdrop::set_current(crate::backdrop::Settings {
+        kind: app.preferences.background_kind,
+        pattern: app.preferences.background_pattern.clone(),
+        image: app.preferences.background_image.clone(),
+    });
+    // Tab colours, read by the tabs alone: the theme's, with the user's own over them.
+    let tabs = tab_colors(app);
+    if crate::theme::set_tab_colors(tabs) {
+        app.styled = false;
+    }
+    let id = file.map(|f| f.id.clone()).unwrap_or_default();
+    apply_theme_preferences(app, &id);
     // egui's end-of-frame shortcuts only change its context; the saved preference would
     // overwrite that change next frame. Consume the desktop shortcuts into the preference.
     if ctx.options(|o| o.zoom_with_keyboard) && !crate::keymap::capturing(app) {
@@ -2701,6 +2843,7 @@ pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::
         o.insert("theme_followed".into(), json!((!followed.is_empty()).then_some(followed)));
         o.insert("theme_follow_error".into(), json!(follow.error().filter(|_| !followed.is_empty())));
         if let Some(id) = imported {
+            o.insert("theme_unused".into(), json!(unused_layout(app, &id)));
             o.insert("theme_imported".into(), json!(id));
         }
         if export {
@@ -2783,14 +2926,116 @@ fn select_theme(app: &mut SolveApp, id: &str) {
     }
 }
 
-/// Import a theme file (its text, or its JSON) into the preferences and turn it on; returns
-/// the id it is kept under.
+/// Seconds the light takes to drift after the pointer.
+const LIGHT_SECONDS: f32 = 0.5;
+
+/// Seconds the interface takes to shift to another tab's colour.
+const TAB_TINT_SECONDS: f32 = 0.6;
+
+/// Seconds the interface takes to settle on the time of day's colour when it changes.
+const DAYLIGHT_SECONDS: f32 = 1.5;
+
+/// The local time of day, in hours past midnight (0 to 24), for colours that follow it.
+fn local_hours() -> f32 {
+    use chrono::Timelike;
+    chrono::Local::now().num_seconds_from_midnight() as f32 / 3600.0
+}
+
+/// The colour the interface is tinted with now, on its way to `target` (the active tab's).
+fn tab_tint_now(ctx: &egui::Context, target: egui::Color32) -> egui::Color32 {
+    crate::theme::shifting(ctx, "sc_tab_tint", target, TAB_TINT_SECONDS)
+}
+
+/// The user's own base colour and glass (Preferences › Interface › Colour and glass).
+fn personal(p: &Prefs) -> crate::theme::Personal {
+    crate::theme::Personal {
+        color: crate::theme_files::color(&p.ui_color),
+        intensity: p.ui_color_intensity,
+        opacity: p.glass_opacity,
+        gloss: p.glass_gloss,
+        menu_opacity: p.glass_menu_opacity,
+        menu_shadow: p.glass_menu_shadow,
+        sky: crate::theme_files::color(&p.background_top).zip(crate::theme_files::color(&p.background_bottom)).map(|(top, bottom)| [top, bottom]),
+    }
+}
+
+/// A theme's `layout.preferences` (`theme_layout::THEMEABLE`), set once when the theme `id` is
+/// turned on: first the values the theme on before replaced are given back, then the ones this
+/// theme replaces are kept to give back in turn. The user may change them while it is on.
+fn apply_theme_preferences(app: &mut SolveApp, id: &str) {
+    if app.preferences.theme_applied == id {
+        return;
+    }
+    let saved = std::mem::take(&mut app.preferences.theme_saved);
+    if !saved.is_empty()
+        && let Err(e) = set(app, &serde_json::Value::Object(saved.into_iter().collect()))
+    {
+        log::warn!("theme preferences: giving back the user's own values: {e}");
+    }
+    let mut values = crate::theme_layout::with(|layout| layout.preferences.as_ref().map(|p| p.values.clone())).unwrap_or_default();
+    if !values.is_empty() {
+        if let Ok(now) = serde_json::to_value(&app.preferences) {
+            app.preferences.theme_saved = values.keys().filter_map(|k| Some((k.clone(), now.get(k)?.clone()))).collect();
+            // A theme that sets part of an object (the navigation bar's `idle`) keeps the rest
+            // of the user's (its buttons).
+            for (key, value) in &mut values {
+                if let (Some(theirs), Some(own)) = (value.as_object(), now.get(key).and_then(serde_json::Value::as_object)) {
+                    let mut merged = own.clone();
+                    merged.extend(theirs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    *value = serde_json::Value::Object(merged);
+                }
+            }
+        }
+        if let Err(e) = set(app, &serde_json::Value::Object(values.into_iter().collect())) {
+            log::warn!("theme preferences of `{id}`: {e}");
+            app.preferences.theme_saved.clear();
+        }
+    }
+    app.preferences.theme_applied = id.to_string();
+}
+
+/// What an imported theme's layout sets that this version doesn't use (kept in the theme).
+fn unused_layout(app: &SolveApp, id: &str) -> Vec<String> {
+    crate::theme_files::find(id, &app.preferences.custom_themes)
+        .and_then(|t| crate::theme_layout::Layout::parse(&t.layout).ok())
+        .map(|layout| layout.unknown)
+        .unwrap_or_default()
+}
+
+/// Install a theme package (`.zip`, `theme_files::from_package`) or a theme file's text from a
+/// file's bytes, and turn it on; returns the id it is kept under.
+pub fn install_theme_bytes(app: &mut SolveApp, bytes: &[u8]) -> Result<String, String> {
+    if crate::theme_files::is_package(bytes) {
+        let theme = crate::theme_files::from_package(bytes)?;
+        let id = crate::theme_files::add(&mut app.preferences.custom_themes, theme)?;
+        select_theme(app, &id);
+        return Ok(id);
+    }
+    if bytes.len() > crate::theme_files::MAX_BYTES {
+        return Err(format!("a theme file is at most {} KiB", crate::theme_files::MAX_BYTES / 1024));
+    }
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| "a theme file is UTF-8 text".to_string())?;
+    import_theme(app, &serde_json::Value::String(text))
+}
+
 /// Import a theme file's text, from a file, a paste or a drop, and say what happened in the status bar.
 fn import_theme_text(app: &mut SolveApp, text: Result<String, String>) {
-    match text.and_then(|text| import_theme(app, &serde_json::Value::String(text))) {
+    let imported = text.and_then(|text| import_theme(app, &serde_json::Value::String(text)));
+    report_theme_import(app, imported);
+}
+
+/// Say in the status bar how importing a theme went: its name, and the parts of its layout this
+/// version keeps but doesn't use; or why it was refused.
+fn report_theme_import(app: &mut SolveApp, imported: Result<String, String>) {
+    match imported {
         Ok(id) => {
+            let unused = unused_layout(app, &id);
             let name = crate::theme_files::find(&id, &app.preferences.custom_themes).map(|t| t.name.clone()).unwrap_or(id);
-            app.set_status(format!("Theme imported: {name}"), false);
+            if unused.is_empty() {
+                app.set_status(format!("Theme imported: {name}"), false);
+            } else {
+                app.set_status(format!("Theme imported: {name} (kept for a newer version: {})", unused.join(", ")), false);
+            }
         }
         Err(e) => app.set_status(format!("Theme import: {e}"), true),
     }
@@ -2851,17 +3096,15 @@ pub fn theme_drop_target(app: &SolveApp, ctx: &egui::Context) -> bool {
         .is_some_and(|rect| ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| rect.contains(p)))
 }
 
-/// A file dropped on the Import tile, as bytes: imported when it is a theme, refused with the reason
-/// otherwise.
+/// A file dropped on the Import tile, as bytes: imported when it is a theme package (`.zip`) or a
+/// theme file, refused with the reason otherwise.
 pub fn import_theme_bytes(app: &mut SolveApp, bytes: Vec<u8>) {
-    let text = if bytes.len() > crate::theme_files::MAX_BYTES {
-        Err("the file is too large for a theme".to_string())
-    } else {
-        String::from_utf8(bytes).map_err(|_| "not a theme file".to_string())
-    };
-    import_theme_text(app, text);
+    let imported = install_theme_bytes(app, &bytes);
+    report_theme_import(app, imported);
 }
 
+/// Import a theme file (its text, or its JSON) into the preferences and turn it on; returns
+/// the id it is kept under.
 pub fn import_theme(app: &mut SolveApp, v: &serde_json::Value) -> Result<String, String> {
     let theme = match v {
         serde_json::Value::String(text) => crate::theme_files::parse(text)?,
@@ -2885,15 +3128,64 @@ fn remove_theme(app: &mut SolveApp, id: &str) -> Result<(), String> {
 }
 
 /// The theme on now as a complete theme file, a starting point for a new one.
+///
+/// Your own adjustments travel with it, so the file shares the look you see: the base colour and
+/// glass sliders baked into its colours and glass, and your tab colours and the tab colour options
+/// in its layout (`tabs`, `preferences`). The colours that change, following the active tab or
+/// the time of day, are kept as their options.
 fn current_theme_file(app: &SolveApp) -> serde_json::Value {
-    theme_file(app, &app.preferences.theme, app.ui.dark)
+    use crate::theme_files::{Base, export, find, resolve};
+    let (name, base, tokens, mut layout) = match find(&app.preferences.theme, &app.preferences.custom_themes) {
+        Some(f) => (f.name.clone(), f.base, resolve(f), f.layout.clone()),
+        None if app.ui.dark => ("Dark".to_string(), Base::Dark, Tokens::dark(), Default::default()),
+        None => ("Light".to_string(), Base::Light, Tokens::light(), Default::default()),
+    };
+    let mut file = export(&name, base, &tokens.personalised(personal(&app.preferences)));
+    let colors: serde_json::Map<_, _> =
+        tab_colors(app).into_iter().map(|(tab, c)| (tab, json!(format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())))).collect();
+    if !colors.is_empty() {
+        layout.insert("tabs".into(), json!({ "colors": colors }));
+    }
+    let mut options = serde_json::Map::new();
+    for (key, on) in [
+        ("tab_colored_icons", app.preferences.tab_colored_icons),
+        ("tab_tint", app.preferences.tab_tint),
+        ("time_of_day", app.preferences.time_of_day),
+    ] {
+        if on {
+            options.insert(key.into(), json!(true));
+        }
+    }
+    if !options.is_empty() {
+        let section = layout.entry("preferences".to_string()).or_insert_with(|| json!({}));
+        if let Some(section) = section.as_object_mut() {
+            section.extend(options);
+        }
+    }
+    if let Some(o) = file.as_object_mut().filter(|_| !layout.is_empty()) {
+        o.insert("layout".into(), json!(layout));
+    }
+    file
+}
+
+/// Tab colours in effect: the theme's (`layout.tabs`), with the user's own over them.
+fn tab_colors(app: &SolveApp) -> std::collections::BTreeMap<String, egui::Color32> {
+    let mut colors = crate::theme_layout::with(|layout| layout.tabs.as_ref().map(|tabs| tabs.colors.clone())).unwrap_or_default();
+    colors.extend(app.preferences.tab_colors.iter().filter_map(|(tab, color)| Some((tab.clone(), crate::theme_files::color(color)?))));
+    colors
 }
 
 /// Export the tile the user chose, without applying it or changing the dialog snapshot.
 fn theme_file(app: &SolveApp, id: &str, system_dark: bool) -> serde_json::Value {
     use crate::theme_files::{Base, export, find, resolve};
     match find(id, &app.preferences.custom_themes) {
-        Some(f) => export(&f.name, f.base, &resolve(f)),
+        Some(f) => {
+            let mut file = export(&f.name, f.base, &resolve(f));
+            if let Some(o) = file.as_object_mut().filter(|_| !f.layout.is_empty()) {
+                o.insert("layout".into(), json!(f.layout));
+            }
+            file
+        }
         None if id == "dark" || (id == "system" && system_dark) => export("Dark", Base::Dark, &crate::theme::Tokens::dark()),
         None => export("Light", Base::Light, &crate::theme::Tokens::light()),
     }
@@ -3024,6 +3316,7 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
         theme.validate_radii()?;
         crate::theme_files::parse_icon_palette(&theme.icon_palette)?;
         crate::theme_files::parse_borders(&theme.borders)?;
+        crate::theme_layout::Layout::parse(&theme.layout)?;
     }
     if new.theme_follow != app.preferences.theme_follow {
         if !FOLLOW_AVAILABLE && !new.theme_follow.trim().is_empty() {
@@ -3067,6 +3360,44 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     }
     if MiddleDoubleClick::parse(&new.middle_double_click).is_none() {
         return Err("`middle_double_click` must be home, fit or off".into());
+    }
+    if new
+        .tab_colors
+        .iter()
+        .any(|(tab, color)| !crate::theme::COLOURED_TABS.iter().any(|(id, _)| id == tab) || crate::theme_files::color(color).is_none())
+    {
+        return Err(format!(
+            "`tab_colors` maps tabs ({}) to #rrggbb colours",
+            crate::theme::COLOURED_TABS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if !crate::backdrop::PATTERNS.iter().any(|(id, _)| *id == new.background_pattern) {
+        return Err(format!(
+            "`background_pattern` must be one of {}",
+            crate::backdrop::PATTERNS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if new.background_image.len() > 4096 || new.background_image.chars().any(char::is_control) {
+        return Err("`background_image` must be a file's path of at most 4096 bytes, without control characters".into());
+    }
+    if [&new.background_top, &new.background_bottom].iter().any(|c| !c.is_empty() && crate::theme_files::color(c).is_none()) {
+        return Err("`background_top` and `background_bottom` must be #rrggbb, or empty for the theme's".into());
+    }
+    if !new.ui_color.is_empty() && crate::theme_files::color(&new.ui_color).is_none() {
+        return Err("`ui_color` must be #rrggbb, or empty for the theme's colours".into());
+    }
+    let within = |v: f32, low: f32| v.is_finite() && (low..=1.0).contains(&v);
+    if !within(new.ui_color_intensity, 0.0)
+        || !within(new.background_strength, 0.0)
+        || !within(new.glass_text_shadow, 0.0)
+        || !new.glass_opacity.is_none_or(|v| within(v, 0.3))
+        || !new.glass_menu_opacity.is_none_or(|v| within(v, 0.3))
+        || !new.glass_menu_shadow.is_none_or(|v| within(v, 0.0))
+        || !new.glass_gloss.is_none_or(|v| within(v, 0.0))
+    {
+        return Err(
+            "`ui_color_intensity`, `background_strength`, `glass_text_shadow` and `glass_gloss` must be 0…1, `glass_opacity` and `glass_menu_opacity` 0.3…1, `glass_menu_shadow` 0…1, or null for the theme's".into()
+        );
     }
     if new.theme != app.preferences.theme && new.theme != "system" {
         app.ui.dark = file.map_or(new.theme == "dark", |f| f.base.is_dark());
@@ -4894,6 +5225,99 @@ mod tests {
         assert!(web.contains("not available in the browser"), "{web}");
         assert_eq!(h.app.preferences.theme_follow, "");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_base_colour_and_glass_sliders_apply_over_any_theme_and_go_back_to_its_own() {
+        use crate::theme::Tokens;
+        use serde_json::json;
+        let mut h = crate::scenario::Harness::new();
+        // Dark, a theme without a file: the colour still tints it.
+        let out = h.call("ui.prefs", json!({"ui_color": "#cc3355", "ui_color_intensity": 1.0}));
+        assert_eq!(out["result"]["ui_color"], "#cc3355", "{out}");
+        h.frames(2);
+        assert_ne!(Tokens::get().app_bar, Tokens::dark().app_bar);
+        for bad in [
+            json!({"ui_color": "red"}),
+            json!({"ui_color": "#cc335580"}),
+            json!({"ui_color_intensity": 2.0}),
+            json!({"glass_opacity": 0.1}),
+            json!({"glass_gloss": -1.0}),
+        ] {
+            assert!(h.call("ui.prefs", bad.clone())["error"].is_string(), "{bad}");
+        }
+        h.call("ui.prefs", json!({"ui_color": ""}));
+        h.frames(2);
+        assert_eq!(Tokens::get().app_bar, Tokens::dark().app_bar, "empty: the theme's own");
+
+        // A glass theme follows the sliders, and goes back to its own glass.
+        h.call("ui.prefs", json!({"theme": "frutiger-aero", "glass_opacity": 0.95, "glass_gloss": 0.1}));
+        h.frames(2);
+        let glass = Tokens::get().borders.glass.unwrap();
+        assert_eq!((glass.opacity, glass.sheen.a()), (0.95, 26));
+        h.call("ui.prefs", json!({"glass_menu_opacity": 0.98}));
+        h.frames(2);
+        assert_eq!(Tokens::get().borders.glass.and_then(|g| g.menu_opacity), Some(0.98), "menus apart from panels");
+        assert!(h.call("ui.prefs", json!({"glass_menu_opacity": 0.1}))["error"].is_string());
+        h.call("ui.prefs", json!({"glass_opacity": null, "glass_gloss": null, "glass_menu_opacity": null}));
+        h.frames(2);
+        let own = crate::theme_files::resolve(crate::theme_files::find("frutiger-aero", &[]).unwrap()).borders.glass;
+        assert_eq!(Tokens::get().borders.glass, own);
+
+        // The Interface page's Defaults puts them all back.
+        h.call("ui.prefs", json!({"ui_color": "#204080", "glass_opacity": 0.5}));
+        assert_eq!(h.app.preferences.ui_color, "#204080");
+        super::defaults(&mut h.app, super::PAGE_INTERFACE);
+        assert_eq!((h.app.preferences.ui_color.as_str(), h.app.preferences.glass_opacity), ("", None));
+    }
+
+    #[test]
+    fn text_on_glass_gets_a_soft_glow_as_strong_as_the_slider_and_other_themes_none() {
+        use serde_json::json;
+        // How many pieces of text were painted with a glow behind them: a group of text shapes,
+        // the glow's copies and the text itself.
+        fn glowing(h: &mut crate::scenario::Harness) -> usize {
+            fn count(shape: &egui::Shape) -> usize {
+                let egui::Shape::Vec(shapes) = shape else { return 0 };
+                let glow = shapes.len() > 1 && shapes.iter().all(|s| matches!(s, egui::Shape::Text(_)));
+                usize::from(glow) + shapes.iter().map(count).sum::<usize>()
+            }
+            let mut output = h.ctx.run_ui(egui::RawInput { screen_rect: Some(h.ctx.content_rect()), focused: true, ..Default::default() }, |ui| {
+                h.app.logic(ui.ctx());
+                h.app.ui(ui);
+            });
+            output.textures_delta.clear();
+            output.shapes.iter().map(|clipped| count(&clipped.shape)).sum()
+        }
+        let mut h = crate::scenario::Harness::new();
+        h.frames(2);
+        assert_eq!(glowing(&mut h), 0, "Dark has no glass");
+        h.call("ui.prefs", json!({"theme": "frutiger-aero"}));
+        h.frames(2);
+        assert!(glowing(&mut h) > 0, "the text on Frutiger Aero's glass glows");
+        h.call("ui.prefs", json!({"glass_text_shadow": 0.0}));
+        h.frames(1);
+        assert_eq!(glowing(&mut h), 0, "none at 0");
+        assert!(h.call("ui.prefs", json!({"glass_text_shadow": 1.5}))["error"].is_string());
+    }
+
+    #[test]
+    fn colours_that_follow_the_time_of_day_tint_the_interface_and_background_and_go_back() {
+        use crate::theme::Tokens;
+        use serde_json::json;
+        let mut h = crate::scenario::Harness::new();
+        let out = h.call("ui.prefs", json!({"time_of_day": true, "ui_color_intensity": 1.0}));
+        assert_eq!(out["result"]["time_of_day"], true, "{out}");
+        h.frames(2);
+        let (now, dark) = (Tokens::get(), Tokens::dark());
+        assert_ne!(now.app_bar, dark.app_bar, "the day's colour is the base colour");
+        assert_ne!((now.viewport_top, now.viewport_bottom), (dark.viewport_top, dark.viewport_bottom), "and the background's");
+        assert!(h.call("ui.prefs", json!({"time_of_day": "dusk"}))["error"].is_string());
+        // An exported theme keeps it as its option, not as the colour of the moment.
+        assert_eq!(super::current_theme_file(&h.app)["layout"]["preferences"]["time_of_day"], true);
+        h.call("ui.prefs", json!({"time_of_day": false}));
+        h.frames(2);
+        assert_eq!((Tokens::get().app_bar, Tokens::get().viewport_top), (dark.app_bar, dark.viewport_top), "off: the theme's own");
     }
 
     #[test]

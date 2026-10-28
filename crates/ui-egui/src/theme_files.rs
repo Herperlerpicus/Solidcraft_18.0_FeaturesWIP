@@ -85,6 +85,10 @@ pub struct ThemeFile {
     /// SVG display roles and three-colour semantic ramps; omitted values keep compiled defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub icon_palette: BTreeMap<String, Value>,
+    /// What the theme arranges besides its colours, by section (`theme_layout`), kept as written
+    /// so sections this version doesn't read survive an export.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layout: BTreeMap<String, Value>,
 }
 
 /// Maximum imported radius, in logical UI points; widgets clamp to their own bounds.
@@ -120,13 +124,48 @@ impl ThemeFile {
 
 /// Strictly bounded strokes shared by file imports and direct preference updates.
 pub(crate) fn parse_borders(values: &BTreeMap<String, Value>) -> Result<crate::theme::Borders, String> {
-    use crate::theme::{Bevel, Borders, InsetBorder};
-    if values.len() > 7 {
-        return Err("`borders` has more than seven roles".into());
+    use crate::theme::{Bevel, Borders, Glass, InsetBorder};
+    if values.len() > 8 {
+        return Err("`borders` has more than eight roles".into());
     }
     let mut borders = Borders::default();
     for (key, value) in values {
         let obj = value.as_object().ok_or_else(|| format!("`borders.{key}` must be an object"))?;
+        if key == "glass" {
+            if obj.keys().any(|k| !matches!(k.as_str(), "opacity" | "sheen" | "sheen_height" | "bubbles" | "menu_opacity" | "menu_shadow")) {
+                return Err("`borders.glass` has an unknown setting".into());
+            }
+            let number = |name: &str, min: f64, max: f64| -> Result<f32, String> {
+                obj.get(name)
+                    .and_then(Value::as_f64)
+                    .filter(|v| v.is_finite() && *v >= min && *v <= max)
+                    .map(|v| v as f32)
+                    .ok_or_else(|| format!("`borders.glass.{name}` must be a finite number from {min} to {max}"))
+            };
+            borders.glass = Some(Glass {
+                opacity: number("opacity", 0.3, 1.0)?,
+                sheen: obj.get("sheen").and_then(Value::as_str).and_then(parse_color).ok_or("`borders.glass.sheen` must be #rrggbb or #rrggbbaa")?,
+                sheen_height: number("sheen_height", 0.0, 128.0)?,
+                // `true` (round, as first written), `"round"` or `"square"`; `false`: none.
+                bubbles: match obj.get("bubbles") {
+                    None | Some(Value::Bool(false)) => None,
+                    Some(Value::Bool(true)) => Some(crate::theme::BubbleShape::Round),
+                    Some(Value::String(shape)) if shape == "round" => Some(crate::theme::BubbleShape::Round),
+                    Some(Value::String(shape)) if shape == "square" => Some(crate::theme::BubbleShape::Square),
+                    Some(_) => return Err("`borders.glass.bubbles` must be true, false, \"round\" or \"square\"".into()),
+                },
+                // Menus and popups, to keep them readable over busy panels; absent: as `opacity`.
+                menu_opacity: match obj.get("menu_opacity") {
+                    None => None,
+                    Some(_) => Some(number("menu_opacity", 0.3, 1.0)?),
+                },
+                menu_shadow: match obj.get("menu_shadow") {
+                    None => None,
+                    Some(_) => Some(number("menu_shadow", 0.0, 1.0)?),
+                },
+            });
+            continue;
+        }
         if key == "bevel" {
             if obj.keys().any(|k| !matches!(k.as_str(), "width" | "highlight" | "light" | "shadow" | "dark_shadow")) {
                 return Err("`borders.bevel` has an unknown setting".into());
@@ -327,6 +366,11 @@ theme_keys! {
 const LEGACY_AXES: [&str; 2] = ["gizmo", "triad"];
 
 /// `#rrggbb` or `#rrggbbaa` (alpha not premultiplied).
+/// An opaque `#rrggbb` colour, as settings outside theme files give one (the base colour).
+pub(crate) fn color(s: &str) -> Option<Color32> {
+    parse_color(s).filter(|c| c.a() == u8::MAX && s.trim().len() == 7)
+}
+
 fn parse_color(s: &str) -> Option<Color32> {
     let hex = s.trim().strip_prefix('#')?;
     if !(hex.len() == 6 || hex.len() == 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -453,7 +497,129 @@ pub fn from_value(v: &Value) -> Result<ThemeFile, String> {
         Some(_) => return Err("`icon_palette` must be an object of SVG roles and ramps".into()),
     };
     parse_icon_palette(&icon_palette)?;
-    Ok(ThemeFile { id: slug(name), name: name.to_string(), base, colors: src.into_iter().collect(), radii, borders, icon_palette })
+    let layout = match v.get("layout") {
+        None => BTreeMap::new(),
+        Some(Value::Object(values)) => values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Some(_) => return Err("`layout` must be an object of layout sections".into()),
+    };
+    crate::theme_layout::Layout::parse(&layout)?;
+    Ok(ThemeFile { id: slug(name), name: name.to_string(), base, colors: src.into_iter().collect(), radii, borders, icon_palette, layout })
+}
+
+/// The largest theme package (`.zip`) read, and the most its files may unpack to, and the most
+/// files it may hold: hostile-input caps.
+pub const MAX_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PACKAGE_UNPACKED: u64 = 8 * 1024 * 1024;
+const MAX_PACKAGE_FILES: usize = 1024;
+
+/// Whether `bytes` are a zip archive (a theme package) rather than a theme file's text.
+pub fn is_package(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04")
+}
+
+/// Read a theme package: a `.zip` holding the theme file (`theme.json`, else its first `*.json`)
+/// and, for a theme with an icon pack, an `icons` folder of `<icon id>.svg` drawings, which join
+/// the theme's `layout.icons.pack` (a drawing the theme file already has wins). Everything else
+/// in the package is ignored. The theme is then read and checked as a theme file is.
+pub fn from_package(bytes: &[u8]) -> Result<ThemeFile, String> {
+    use std::io::Read;
+    if bytes.len() > MAX_PACKAGE_BYTES {
+        return Err(format!("a theme package is at most {} MiB", MAX_PACKAGE_BYTES / (1024 * 1024)));
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("not a theme package: {e}"))?;
+    if archive.len() > MAX_PACKAGE_FILES {
+        return Err(format!("a theme package holds at most {MAX_PACKAGE_FILES} files"));
+    }
+    let (mut theme, mut icons): (Option<(bool, String)>, BTreeMap<String, String>) = (None, BTreeMap::new());
+    let mut unpacked = 0_u64;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("theme package: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let path = entry.name().map_err(|e| format!("theme package: {e}"))?.replace('\\', "/");
+        let file = path.rsplit('/').next().unwrap_or("").to_string();
+        let lower = file.to_ascii_lowercase();
+        let is_theme = lower.ends_with(".json");
+        let icon = lower.strip_suffix(".svg").filter(|_| path.split('/').any(|dir| dir.eq_ignore_ascii_case("icons"))).map(|_| file.len() - 4);
+        if !is_theme && icon.is_none() {
+            continue;
+        }
+        let limit = if is_theme { MAX_BYTES } else { crate::icon_svg::MAX_PACK_SVG } as u64;
+        if entry.size() > limit {
+            return Err(format!("{path} in the package is too large"));
+        }
+        let mut text = String::new();
+        (&mut entry).take(limit + 1).read_to_string(&mut text).map_err(|e| format!("{path}: {e}"))?;
+        unpacked += text.len() as u64;
+        if text.len() as u64 > limit || unpacked > MAX_PACKAGE_UNPACKED {
+            return Err(format!("{path} in the package is too large"));
+        }
+        match icon {
+            Some(stem) => {
+                icons.insert(file.get(..stem).unwrap_or("").to_string(), text);
+            }
+            None => {
+                let preferred = lower == "theme.json";
+                if theme.as_ref().is_none_or(|(found, _)| preferred && !found) {
+                    theme = Some((preferred, text));
+                }
+            }
+        }
+    }
+    let (_, text) = theme.ok_or("the package has no theme file (theme.json)")?;
+    let mut value: Value = serde_json::from_str(&text).map_err(|e| format!("theme.json: {e}"))?;
+    if !icons.is_empty() {
+        let object =
+            |v: &mut Value, what: &str| -> Result<(), String> { if v.is_object() { Ok(()) } else { Err(format!("`{what}` must be an object")) } };
+        let theme = value.as_object_mut().ok_or("theme.json: not a theme file")?;
+        let layout = theme.entry("layout").or_insert_with(|| json!({}));
+        object(layout, "layout")?;
+        let section = layout.as_object_mut().map(|l| l.entry("icons").or_insert_with(|| json!({})));
+        let section = section.ok_or("`layout` must be an object")?;
+        object(section, "layout.icons")?;
+        let pack = section.as_object_mut().map(|s| s.entry("pack").or_insert_with(|| json!({})));
+        let pack = pack.and_then(Value::as_object_mut).ok_or("`layout.icons.pack` must be an object")?;
+        for (id, svg) in icons {
+            pack.entry(id).or_insert(Value::String(svg));
+        }
+    }
+    from_value(&value)
+}
+
+/// Write a theme package (`from_package`) of a theme file's JSON: `theme.json`, and its icon
+/// pack's drawings as `icons/<icon id>.svg`, easier to edit than inside the JSON.
+pub fn package(theme: &Value) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut theme = theme.clone();
+    let mut drawings = serde_json::Map::new();
+    if let Some(layout) = theme.get_mut("layout").and_then(Value::as_object_mut) {
+        if let Some(icons) = layout.get_mut("icons").and_then(Value::as_object_mut) {
+            if let Some(Value::Object(pack)) = icons.remove("pack") {
+                drawings = pack;
+            }
+            if icons.is_empty() {
+                layout.remove("icons");
+            }
+        }
+        if layout.is_empty()
+            && let Some(theme) = theme.as_object_mut()
+        {
+            theme.remove("layout");
+        }
+    }
+    let text = serde_json::to_string_pretty(&theme).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("theme.json", options).map_err(|e| e.to_string())?;
+    zip.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    for (id, svg) in drawings {
+        // An id names a file in the package: nothing that could climb out of its folder.
+        let Some(svg) = svg.as_str().filter(|_| !id.is_empty() && !id.contains(['/', '\\']) && !id.contains("..")) else { continue };
+        zip.start_file(format!("icons/{id}.svg"), options).map_err(|e| e.to_string())?;
+        zip.write_all(svg.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map(std::io::Cursor::into_inner).map_err(|e| e.to_string())
 }
 
 /// An id from a name: lower-case letters, digits and dashes.
@@ -609,6 +775,21 @@ pub fn export(name: &str, base: Base, t: &Tokens) -> Value {
             json!({"width": bevel.width, "highlight": format_color(bevel.highlight),
             "light": format_color(bevel.light), "shadow": shadow, "dark_shadow": format_color(bevel.dark_shadow)}),
         );
+    }
+    if let Some(glass) = t.borders.glass {
+        borders.insert(
+            "glass".into(),
+            json!({"opacity": glass.opacity, "sheen": format_color(glass.sheen), "sheen_height": glass.sheen_height,
+                "bubbles": glass.bubbles.map_or(json!(false), |shape| json!(shape.id()))}),
+        );
+        if let Some(object) = borders.get_mut("glass").and_then(Value::as_object_mut) {
+            if let Some(menu) = glass.menu_opacity {
+                object.insert("menu_opacity".into(), json!(menu));
+            }
+            if let Some(shadow) = glass.menu_shadow {
+                object.insert("menu_shadow".into(), json!(shadow));
+            }
+        }
     }
     let icon_palette = export_icon_palette(t.icon_palette);
     json!({"format": FORMAT, "name": name, "base": base, "colors": colors, "radii": radii, "borders": borders, "icon_palette": icon_palette})
@@ -928,6 +1109,54 @@ mod tests {
         for theme in builtin() {
             assert_eq!(resolve(theme).borders.bevel.is_some(), theme.id == "solidcraft-95", "{}", theme.id);
         }
+    }
+
+    #[test]
+    fn glass_import_export_is_bounded_and_only_frutiger_aero_ships_it() {
+        let source = json!({"format": FORMAT, "name": "Glass", "base": "light",
+            "borders": {"glass": {"opacity": 0.75, "sheen": "#ffffff80", "sheen_height": 30}}});
+        let tokens = resolve(&from_value(&source).unwrap());
+        let glass = tokens.borders.glass.unwrap();
+        assert_eq!((glass.opacity, glass.sheen, glass.sheen_height, glass.bubbles), (0.75, Color32::from_white_alpha(128), 30.0, None));
+        assert_eq!(resolve(&from_value(&export("Glass", Base::Light, &tokens)).unwrap()), tokens, "export keeps the glass");
+        use crate::theme::BubbleShape::{Round, Square};
+        for (value, shape) in [(json!(true), Some(Round)), (json!("round"), Some(Round)), (json!("square"), Some(Square)), (json!(false), None)] {
+            let mut bubbly = source.clone();
+            bubbly["borders"]["glass"]["bubbles"] = value.clone();
+            let tokens = resolve(&from_value(&bubbly).unwrap());
+            assert_eq!(tokens.borders.glass.and_then(|glass| glass.bubbles), shape, "{value}");
+            assert_eq!(resolve(&from_value(&export("Bubbles", Base::Light, &tokens)).unwrap()), tokens, "export keeps the bubbles");
+        }
+        let mut menus = source.clone();
+        menus["borders"]["glass"]["menu_opacity"] = json!(0.95);
+        let tokens = resolve(&from_value(&menus).unwrap());
+        assert_eq!(tokens.borders.glass.and_then(|glass| glass.menu_opacity), Some(0.95));
+        assert_eq!(resolve(&from_value(&export("Menus", Base::Light, &tokens)).unwrap()), tokens, "export keeps the menu opacity");
+        for (key, value) in [
+            ("menu_opacity", json!(0.1)),
+            ("menu_opacity", json!("0.9")),
+            ("bubbles", json!("yes")),
+            ("bubbles", json!(1)),
+            ("opacity", json!(0.1)),
+            ("opacity", json!(1.5)),
+            ("opacity", json!("0.5")),
+            ("sheen", json!("white")),
+            ("sheen_height", json!(-1)),
+            ("sheen_height", json!(500)),
+            ("blur", json!(4)),
+        ] {
+            let mut bad = source.clone();
+            bad["borders"]["glass"][key] = value;
+            assert!(from_value(&bad).is_err(), "{bad}");
+        }
+        let mut missing = source;
+        missing["borders"]["glass"].as_object_mut().unwrap().remove("sheen");
+        assert!(from_value(&missing).is_err());
+        for theme in builtin() {
+            assert_eq!(resolve(theme).borders.glass.is_some(), theme.id == "frutiger-aero", "{}", theme.id);
+        }
+        let aero = resolve(find("frutiger-aero", &[]).unwrap()).borders.glass.and_then(|glass| glass.bubbles);
+        assert_eq!(aero, Some(Square), "Frutiger Aero has square tiles");
     }
 
     #[test]
@@ -1374,6 +1603,7 @@ mod tests {
         for id in ["clay", "clay-dark"] {
             assert_eq!(values(id), [6, 9, 13, 18, 9, 10], "{id}");
         }
+        assert_eq!(values("frutiger-aero"), [4, 6, 8, 10, 4, 6]);
         let defaults = radius_values(Tokens::dark());
         assert_eq!(defaults, radius_values(Tokens::light()));
         for suffix in ["", "-hard", "-soft"] {

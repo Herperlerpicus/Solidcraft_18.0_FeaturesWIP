@@ -56,6 +56,11 @@ impl DockEdges {
     pub const ALL: Self = Self { left: true, right: true, top: true, bottom: true };
 }
 
+/// Where a glass host's sheen goes: a place reserved under its contents
+/// (`Container::begin_content`). Empty without glass.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GlassSlot(Option<egui::layers::ShapeIdx>);
+
 /// Universal outer host and surface policy. Both host geometry and frame construction must go
 /// through this API, including code in nested modules and platform apps.
 #[derive(Clone, Copy)]
@@ -133,7 +138,7 @@ impl Container {
     pub fn frame(self, ctx: &Context, fill: Color32, side: crate::frame::Side) -> Frame {
         let t = Tokens::get();
         let flat = Frame::NONE.fill(fill);
-        match self.surface {
+        let frame = match self.surface {
             Surface::Feature | Surface::Palette if !self.floating() => {
                 let edges = self.joined.unwrap_or(DockEdges { left: side == Side::Left, right: side == Side::Right, ..Default::default() });
                 Self::compact_frame(fill, t.primary_border(t.dialog_border), edges)
@@ -148,6 +153,23 @@ impl Container {
             Surface::Toast => flat.stroke(t.primary_border(t.border)).corner_radius(t.radius_md).shadow(t.shell_shadow()),
             Surface::Popup => Self::popup_frame(&ctx.global_style()).fill(fill),
             Surface::ApplicationBar | Surface::Canvas | Surface::Viewport | Surface::InputShield => flat,
+        };
+        self.glazed(frame)
+    }
+
+    /// A glass theme's surfaces over the 3D view let it show through, without a drop shadow
+    /// (it would show through too); menus, popups and notifications by the theme's menu opacity,
+    /// so they stay readable over busy panels. `decorate` adds their sheen.
+    fn glazed(self, frame: Frame) -> Frame {
+        let over_view = self.floating() || matches!(self.surface, Surface::Window | Surface::Popup | Surface::Toast | Surface::Navigation);
+        match Tokens::get().borders.glass {
+            // Menus, popups and notifications cast the theme's menu shadow; nearly solid, they
+            // don't show it through.
+            Some(glass) if over_view => match self.surface {
+                Surface::Popup | Surface::Toast => frame.fill(glass.menu_fill(frame.fill)).shadow(glass.menu_shadow()),
+                _ => frame.fill(glass.fill(frame.fill)).shadow(egui::Shadow::NONE),
+            },
+            _ => frame,
         }
     }
 
@@ -205,6 +227,7 @@ impl Container {
         body: impl FnOnce(&mut egui::Ui) -> R,
     ) -> egui::InnerResponse<R> {
         let mut prepared = frame.begin(ui);
+        let glass = Self::begin_content(&prepared.content_ui);
         let inner = body(&mut prepared.content_ui);
         if self.adaptive() && !self.floating() {
             let rect = prepared.frame.outer_rect(prepared.content_ui.min_rect());
@@ -217,17 +240,43 @@ impl Container {
         }
         let frame = prepared.frame;
         let response = prepared.end(ui);
-        Self::paint_inset(ui.painter(), response.rect - frame.outer_margin, frame);
+        Self::decorate(ui.painter(), response.rect - frame.outer_margin, frame, glass, 0.0);
         egui::InnerResponse { inner, response }
+    }
+
+    /// Reserve, before a host's contents, the place of its glass sheen, so the sheen paints
+    /// under them and never over text or buttons. Pass it to `finish_content`.
+    pub(crate) fn begin_content(ui: &egui::Ui) -> GlassSlot {
+        GlassSlot(Tokens::get().borders.glass.map(|_| ui.painter().add(egui::Shape::Noop)))
     }
 
     /// Optional companion to a primary outline, painted inside the allocated surface.
     /// It consumes no layout space or input target. Tiny/collapsed surfaces omit it.
     pub(crate) fn paint_inset(painter: &egui::Painter, widget: egui::Rect, frame: Frame) {
+        Self::decorate(painter, widget, frame, GlassSlot::default(), 0.0);
+    }
+
+    /// A host's own decoration: its glass sheen (into `glass`, under its contents), bevel and
+    /// inset outline. It stays inside what clips the host (its scroll area, its window), so
+    /// scrolled-away content leaves nothing behind; `padding` widens that clip for a content
+    /// painter, whose clip leaves out the host's padding the decoration belongs to.
+    fn decorate(painter: &egui::Painter, widget: egui::Rect, frame: Frame, glass: GlassSlot, padding: f32) {
         let t = Tokens::get();
+        let mut chrome = painter.clone();
+        chrome.set_clip_rect(widget.intersect(painter.clip_rect().expand(padding)).intersect(painter.ctx().content_rect()));
+        // Glass surfaces are the translucent ones (`glazed`); an opaque or empty fill has no sheen.
+        if glass.0.is_some() && t.borders.glass.is_some() && frame.fill.a() > 0 && frame.fill.a() < u8::MAX {
+            crate::theme::glass_area(&chrome, widget);
+        }
+        if let (Some(slot), Some(glass)) = (glass.0, t.borders.glass)
+            && frame.fill.a() > 0
+            && frame.fill.a() < u8::MAX
+            && let Some(sheen) = glass.sheen_mesh(widget.shrink(frame.stroke.width), frame.corner_radius)
+        {
+            let streaks = glass.streaks_mesh(painter.ctx().content_rect(), widget.shrink(frame.stroke.width + 1.0));
+            chrome.set(slot, egui::Shape::Vec(std::iter::once(sheen.into()).chain(streaks.map(Into::into)).collect()));
+        }
         if let Some(bevel) = t.borders.bevel {
-            let mut chrome = painter.clone();
-            chrome.set_clip_rect(widget.intersect(painter.ctx().content_rect()));
             bevel.paint(&chrome, widget, frame.corner_radius, false, true);
         }
         let Some(inset) = t.borders.primary_inset else {
@@ -240,11 +289,7 @@ impl Container {
         }
         let reduce = |r: u8| r.saturating_sub(distance.ceil() as u8);
         let radius = frame.corner_radius;
-        // A host's content clip excludes its padding. The companion belongs to the whole
-        // host, so clip to that known surface and the viewport instead of the content well.
-        let mut painter = painter.clone();
-        painter.set_clip_rect(widget.intersect(painter.ctx().content_rect()));
-        painter.rect_stroke(
+        chrome.rect_stroke(
             rect,
             egui::CornerRadius { nw: reduce(radius.nw), ne: reduce(radius.ne), sw: reduce(radius.sw), se: reduce(radius.se) },
             inset.stroke,
@@ -252,15 +297,35 @@ impl Container {
         );
     }
 
-    /// Manually painted chrome uses exactly the same outer and inset policy as hosts.
-    pub(crate) fn paint_frame(painter: &egui::Painter, frame: Frame, content: egui::Rect) {
-        painter.add(frame.paint(content));
-        Self::paint_inset(painter, frame.widget_rect(content), frame);
+    /// A frame's shape around `content` with its glass sheen, for a host that paints its frame
+    /// itself before its contents (ribbon cards, the command search sheet): the sheen comes out
+    /// under them. `paint_inset` still adds the rim afterwards. `painter` is the one it goes into.
+    pub(crate) fn painted(painter: &egui::Painter, frame: Frame, content: egui::Rect) -> egui::Shape {
+        let widget = frame.widget_rect(content);
+        let glass = Tokens::get().borders.glass.filter(|_| frame.fill.a() > 0 && frame.fill.a() < u8::MAX);
+        let Some(glass) = glass else { return frame.paint(content) };
+        crate::theme::glass_area(painter, widget);
+        let mut shapes = vec![frame.paint(content)];
+        shapes.extend(glass.sheen_mesh(widget.shrink(frame.stroke.width), frame.corner_radius).map(Into::into));
+        // Painted in the host's own painter, outside a clip of its own: the mesh is cut to the host.
+        shapes.extend(glass.streaks_mesh(Tokens::screen(), widget.shrink(frame.stroke.width + 1.0)).map(Into::into));
+        egui::Shape::Vec(shapes)
     }
 
-    /// Decorate the content-hugging frame of a popup or feature sheet after its contents.
-    pub(crate) fn finish_content(ui: &egui::Ui, frame: Frame) {
-        Self::paint_inset(ui.painter(), frame.widget_rect(ui.min_rect()), frame);
+    /// Manually painted chrome uses exactly the same outer and inset policy as hosts. The
+    /// caller paints its contents afterwards, so the sheen goes in now, under them.
+    pub(crate) fn paint_frame(painter: &egui::Painter, frame: Frame, content: egui::Rect) {
+        painter.add(frame.paint(content));
+        let glass = GlassSlot(Tokens::get().borders.glass.map(|_| painter.add(egui::Shape::Noop)));
+        Self::decorate(painter, frame.widget_rect(content), frame, glass, 0.0);
+    }
+
+    /// Decorate the content-hugging frame of a popup or feature sheet after its contents, with
+    /// the sheen in the place `begin_content` reserved before them.
+    pub(crate) fn finish_content(ui: &egui::Ui, frame: Frame, glass: GlassSlot) {
+        let m = frame.inner_margin;
+        let padding = [m.leftf(), m.rightf(), m.topf(), m.bottomf()].into_iter().fold(0.0, f32::max) + frame.stroke.width;
+        Self::decorate(ui.painter(), frame.widget_rect(ui.min_rect()), frame, glass, padding);
     }
 
     pub fn area(self, id: Id) -> egui::Area {
@@ -294,7 +359,7 @@ impl Container {
 
     pub(crate) fn menu_frame() -> Frame {
         let t = Tokens::get();
-        egui::Frame::NONE
+        let frame = egui::Frame::NONE
             .fill(t.dialog_body)
             .stroke(t.primary_border(t.dialog_border))
             .corner_radius(t.radius_xl)
@@ -304,7 +369,8 @@ impl Container {
                 blur: (t.space_24 + t.space_12) as u8,
                 spread: 0,
                 color: t.app_bar.gamma_multiply(0.18),
-            })
+            });
+        Self::for_layout(LayoutMode::Floating, Surface::Popup).glazed(frame)
     }
 
     pub(crate) fn submenu(self) -> egui::menu::SubMenu {

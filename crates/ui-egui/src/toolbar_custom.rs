@@ -185,12 +185,26 @@ fn key(tab: &str, panel: &str) -> String {
     format!("{WORKSPACE}/{tab}/{panel}")
 }
 
-/// The buttons a panel shows: the user's list, or the first `promoted` commands of the panel.
+/// The buttons a panel shows: the user's list, else the theme's (`theme_layout`, `ribbon`), else
+/// the first `promoted` commands of the panel.
 pub fn buttons(app: &SolveApp, tab: &str, panel: &str, cmds: &[&'static CommandSpec], promoted: usize) -> Vec<&'static CommandSpec> {
-    match app.toolbar_custom.panels.get(&key(tab, panel)) {
+    let theme;
+    let ids = match app.toolbar_custom.panels.get(&key(tab, panel)) {
+        Some(ids) => Some(ids),
+        None => {
+            theme = themed(tab, panel);
+            theme.as_ref()
+        }
+    };
+    match ids {
         Some(ids) => ids.iter().filter_map(|id| solidcraft_engine::find_command(id)).collect(),
         None => cmds.iter().take(promoted).copied().collect(),
     }
+}
+
+/// The theme's buttons for a panel, under the user's own list.
+fn themed(tab: &str, panel: &str) -> Option<Vec<String>> {
+    crate::theme_layout::with(|layout| layout.ribbon.as_ref().and_then(|ribbon| ribbon.panel(tab, panel).cloned()))
 }
 
 /// A tab's panels with their commands and default button counts.
@@ -223,6 +237,9 @@ fn own(app: &mut SolveApp, tab: &str, panel: &str) -> Vec<String> {
     let k = key(tab, panel);
     if let Some(v) = app.toolbar_custom.panels.get(&k) {
         return v.clone();
+    }
+    if let Some(ids) = themed(tab, panel) {
+        return ids;
     }
     let lists = panel_lists(tab);
     let ids: Vec<String> =

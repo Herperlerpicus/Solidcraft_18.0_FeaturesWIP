@@ -57,6 +57,421 @@ pub struct Borders {
     pub primary_inset: Option<InsetBorder>,
     /// Optional directional chrome. Absent themes keep their flat strokes.
     pub bevel: Option<Bevel>,
+    /// Optional translucent chrome over the 3D view. Absent themes keep opaque surfaces.
+    pub glass: Option<Glass>,
+}
+
+/// Glass surfaces: what floats over the 3D view (floating panels, windows, popups, menus,
+/// toasts, navigation) lets it show through, with a sheen fading down from the top edge.
+/// Docked panels and the application bar stay opaque.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glass {
+    /// How much of a surface's own fill covers the view behind it (0.3 to 1).
+    pub opacity: f32,
+    /// The sheen's colour at the top edge; it fades out over `sheen_height` points.
+    pub sheen: Color32,
+    pub sheen_height: f32,
+    /// Command, navigation and title bar buttons sit on glossy bubbles of this shape
+    /// (`paint_bubble`) in place of flat hover and pressed fills. `None`: flat fills.
+    pub bubbles: Option<BubbleShape>,
+    /// How much menus, popups, tooltips and notifications cover what is behind them (0.3 to 1),
+    /// usually more than panels so their text stays readable over busy ones. `None`: `opacity`.
+    pub menu_opacity: Option<f32>,
+    /// How deep a shadow menus, popups, tooltips and notifications cast (0 to 1: softness,
+    /// offset and darkness together). `None` or 0: none, as glass surfaces otherwise have.
+    pub menu_shadow: Option<f32>,
+}
+
+/// The shape of a glass theme's bubbles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BubbleShape {
+    /// Orbs.
+    #[default]
+    Round,
+    /// Tiles with rounded corners.
+    Square,
+}
+
+impl BubbleShape {
+    pub fn id(self) -> &'static str {
+        match self {
+            BubbleShape::Round => "round",
+            BubbleShape::Square => "square",
+        }
+    }
+}
+
+/// What a bubble shows of its button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bubble {
+    Rest,
+    Hover,
+    /// Pressed, or on (a running command, a selected tool).
+    On,
+    Disabled,
+}
+
+/// A bubble painted behind a button's icon (`Tokens::bubble`); `finish` adds its gloss over the
+/// icon once that is drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Bubbled {
+    glass: Glass,
+    center: egui::Pos2,
+    radius: f32,
+    state: Bubble,
+}
+
+impl Bubbled {
+    pub fn finish(self, painter: &egui::Painter) {
+        self.glass.paint_bubble_gloss(painter, self.center, self.radius, self.state);
+    }
+}
+
+impl Bubble {
+    /// A button's bubble state: disabled, on (pressed, or `on`: running, selected, open), under
+    /// the pointer or focused, or at rest.
+    pub fn of(response: &egui::Response, enabled: bool, on: bool) -> Self {
+        if !enabled {
+            Bubble::Disabled
+        } else if on || response.is_pointer_button_down_on() {
+            Bubble::On
+        } else if response.hovered() || response.has_focus() {
+            Bubble::Hover
+        } else {
+            Bubble::Rest
+        }
+    }
+
+    /// The body's tint, the rim's and the white shine of a bubble in this state.
+    fn strengths(self) -> (f32, f32, f32) {
+        match self {
+            Bubble::Rest => (0.16, 0.45, 0.7),
+            Bubble::Hover => (0.32, 0.75, 0.9),
+            Bubble::On => (0.6, 1.0, 0.8),
+            Bubble::Disabled => (0.08, 0.25, 0.35),
+        }
+    }
+}
+
+impl Glass {
+    /// A glossy bubble of `radius` behind an icon at `center`, tinted with `tint` (the tab's
+    /// accent): a translucent body, a glow along its bottom and a rim. `paint_bubble_gloss`
+    /// then covers the icon with the bubble's highlight. Paint only: no layout or input target.
+    /// Too small or non-finite: nothing.
+    pub fn paint_bubble(self, painter: &egui::Painter, center: egui::Pos2, radius: f32, tint: Color32, state: Bubble) {
+        if !center.is_finite() || !radius.is_finite() || radius < 4.0 {
+            return;
+        }
+        let (body, rim, shine) = state.strengths();
+        // The glow: brightest at the bottom edge, gone above the middle.
+        let glow = |p: egui::Pos2| Color32::WHITE.gamma_multiply(0.45 * shine * ((p.y - center.y) / radius).clamp(0.0, 1.0));
+        let rim = Stroke::new(1.0, tint.gamma_multiply(rim));
+        let inner = Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.5 * shine));
+        match self.bubbles.unwrap_or_default() {
+            BubbleShape::Round => {
+                painter.circle_filled(center, radius, tint.gamma_multiply(body));
+                fan(painter, center, Color32::TRANSPARENT, ellipse(center, egui::vec2(radius, radius)), glow);
+                painter.circle_stroke(center, radius - 0.5, rim);
+                painter.circle_stroke(center, radius - 1.5, inner);
+            }
+            BubbleShape::Square => {
+                let (tile, corner) = tile(center, radius);
+                self.paint_tile(painter, tile, egui::CornerRadius::same(corner), tint, state);
+            }
+        }
+    }
+
+    /// A glass tile filling `rect` with its own `corner`s (a button's whole face, or one segment
+    /// of a joined group): a translucent body in `tint`, a glow along its bottom, a gloss over
+    /// its top half that fades out at the middle, and a rim. All of it goes behind the icon and
+    /// label the caller draws next, so the gloss never covers them. Too small: nothing.
+    pub fn paint_tile(self, painter: &egui::Painter, rect: egui::Rect, corner: egui::CornerRadius, tint: Color32, state: Bubble) {
+        if !rect.is_finite() || rect.width() < 6.0 || rect.height() < 6.0 {
+            return;
+        }
+        let (body, rim, shine) = state.strengths();
+        let center = rect.center();
+        painter.rect_filled(rect, corner, tint.gamma_multiply(body));
+        let half = rect.height() * 0.5;
+        let glow = |p: egui::Pos2| Color32::WHITE.gamma_multiply(0.45 * shine * ((p.y - center.y) / half).clamp(0.0, 1.0));
+        fan(painter, center, Color32::TRANSPARENT, outline(rect, corner), glow);
+        // The gloss: the top half inside the rim, brightest at the top and gone at the middle.
+        let face = rect.shrink(1.5);
+        let inner_corner = shrunk(corner, 1);
+        let fade = |y: f32| Color32::WHITE.gamma_multiply(0.6 * shine * (1.0 - (y - face.top()) / (center.y - face.top())).clamp(0.0, 1.0));
+        let top = outline(face, inner_corner).into_iter().map(|p| egui::pos2(p.x, p.y.min(center.y))).collect();
+        fan(painter, center, fade(center.y), top, |p| fade(p.y));
+        self.paint_streaks(painter, rect.shrink(1.0));
+        painter.rect_stroke(rect, corner, Stroke::new(1.0, tint.gamma_multiply(rim)), egui::StrokeKind::Inside);
+        painter.rect_stroke(rect.shrink(1.0), inner_corner, Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.5 * shine)), egui::StrokeKind::Inside);
+    }
+
+    /// An orb's highlight, painted over its icon like a glass dome: an ellipse across the top
+    /// half, fading downwards, light enough that the icon reads through it. Tiles have theirs
+    /// under the icon already. The icon's own artwork is unchanged.
+    pub fn paint_bubble_gloss(self, painter: &egui::Painter, center: egui::Pos2, radius: f32, state: Bubble) {
+        if !center.is_finite() || !radius.is_finite() || radius < 4.0 {
+            return;
+        }
+        let shine = 0.6 * state.strengths().2;
+        match self.bubbles.unwrap_or_default() {
+            BubbleShape::Round => {
+                let top = egui::pos2(center.x, center.y - radius * 0.42);
+                let size = egui::vec2(radius * 0.72, radius * 0.48);
+                let fade = |p: egui::Pos2| Color32::WHITE.gamma_multiply(shine * ((top.y + size.y * 0.7 - p.y) / (size.y * 1.7)).clamp(0.0, 1.0));
+                fan(painter, top, fade(top), ellipse(top, size), fade);
+            }
+            // A tile's gloss went under its icon with the tile (`paint_tile`).
+            BubbleShape::Square => {}
+        }
+    }
+    /// A glass surface's fill. Its drop shadow is left out, since it would show through.
+    pub fn fill(self, fill: Color32) -> Color32 {
+        fill.gamma_multiply(self.opacity.clamp(0.0, 1.0))
+    }
+
+    /// The drop shadow of a menu, popup, tooltip or notification (`menu_shadow`).
+    pub fn menu_shadow(self) -> egui::Shadow {
+        let depth = self.menu_shadow.filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0);
+        if depth <= 0.0 {
+            return egui::Shadow::NONE;
+        }
+        egui::Shadow {
+            offset: [0, (2.0 + 6.0 * depth).round() as i8],
+            blur: (6.0 + 22.0 * depth).round() as u8,
+            spread: 0,
+            color: Color32::from_black_alpha((90.0 * depth).round() as u8),
+        }
+    }
+
+    /// A menu's, popup's, tooltip's or notification's fill (`menu_opacity`).
+    pub fn menu_fill(self, fill: Color32) -> Color32 {
+        fill.gamma_multiply(self.menu_opacity.unwrap_or(self.opacity).clamp(0.0, 1.0))
+    }
+
+    /// Paint the sheen inside `rect` and its rounded corners; no layout or input target.
+    pub fn paint_sheen(self, painter: &egui::Painter, rect: egui::Rect, radius: impl Into<egui::CornerRadius>) {
+        if let Some(mesh) = self.sheen_mesh(rect, radius) {
+            painter.add(mesh);
+        }
+    }
+
+    /// The sheen of `rect` as a shape, for a host that reserved its place under its contents
+    /// (`Container::begin_content`). Too small or non-finite: `None`.
+    pub fn sheen_mesh(self, rect: egui::Rect, radius: impl Into<egui::CornerRadius>) -> Option<egui::Mesh> {
+        let height = self.sheen_height.min(rect.height() * 0.5);
+        if !rect.is_finite() || !height.is_finite() || height < 2.0 || rect.width() < 4.0 || self.sheen.a() == 0 {
+            return None;
+        }
+        let radius: egui::CornerRadius = radius.into();
+        let rounding: egui::epaint::CornerRadiusF32 = radius.into();
+        let mut path = Vec::new();
+        egui::epaint::tessellator::path::rounded_rectangle(&mut path, rect, rounding);
+        let count = u32::try_from(path.len()).ok()?;
+        // A fan from the point where the sheen has faded out; the outline is convex.
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(egui::pos2(rect.center().x, rect.top() + height), Color32::TRANSPARENT);
+        for point in &path {
+            mesh.colored_vertex(*point, self.sheen.gamma_multiply((1.0 - (point.y - rect.top()) / height).clamp(0.0, 1.0)));
+        }
+        for i in 0..count {
+            mesh.add_triangle(0, i + 1, (i + 1) % count + 1);
+        }
+        Some(mesh)
+    }
+
+    /// Diagonal streaks of light across a glass bar (the title bar), as light catches a pane:
+    /// a few slanted bands in the sheen's colour, brightest at the top and fading downwards,
+    /// clipped to `rect`. Paint before the bar's contents. The Gloss setting dims them with the
+    /// sheen.
+    pub fn paint_streaks(self, painter: &egui::Painter, rect: egui::Rect) {
+        glass_area(painter, rect);
+        if let Some(streaks) = self.streaks_mesh(painter.ctx().content_rect(), rect) {
+            painter.add(streaks);
+        }
+    }
+
+    /// The streaks of light `rect` shows: one set of bands across the whole window (`screen`), as
+    /// if one light falls on all its glass, so they line up across every glass surface; each
+    /// surface shows the part it covers, cut to its rectangle, brightest along its top. White
+    /// light as strong as the sheen (the Gloss setting). `None`: nothing to show.
+    pub fn streaks_mesh(self, screen: egui::Rect, rect: egui::Rect) -> Option<egui::Mesh> {
+        if !rect.is_finite() || !screen.is_finite() || rect.width() < 4.0 || rect.height() < 4.0 || self.sheen.a() == 0 {
+            return None;
+        }
+        let light = Color32::WHITE.gamma_multiply(f32::from(self.sheen.a()) / 255.0);
+        let mut mesh = egui::Mesh::default();
+        // (where across the window the band starts at its top, how wide, how bright)
+        for (at, width, strength) in [(0.18, 84.0, 0.5), (0.235, 30.0, 0.42), (0.52, 120.0, 0.36), (0.6, 40.0, 0.45)] {
+            // The band leans: its left edge moves right as it goes down the window. It is soft:
+            // its light rises across its first third, holds, and fades across its last third,
+            // each part a strip of its own so the light changes evenly across it.
+            // The bands drift with the light, as if it moved.
+            let drift = self::light().x * STREAK_DRIFT;
+            let left = |y: f32| screen.left() + screen.width() * at + drift + (y - screen.top()) * STREAK_SLANT;
+            let profile = |p: egui::Pos2| {
+                let across = ((p.x - left(p.y)) / width).clamp(0.0, 1.0);
+                (across / STREAK_EDGE).min((1.0 - across) / STREAK_EDGE).min(1.0)
+            };
+            for (from, to) in [(0.0, STREAK_EDGE), (STREAK_EDGE, 1.0 - STREAK_EDGE), (1.0 - STREAK_EDGE, 1.0)] {
+                let strip = [
+                    egui::pos2(left(rect.top()) + width * from, rect.top()),
+                    egui::pos2(left(rect.top()) + width * to, rect.top()),
+                    egui::pos2(left(rect.bottom()) + width * to, rect.bottom()),
+                    egui::pos2(left(rect.bottom()) + width * from, rect.bottom()),
+                ];
+                let piece = clip_x(&clip_x(&strip, rect.left(), true), rect.right(), false);
+                let Ok(first) = u32::try_from(mesh.vertices.len()) else { return None };
+                let Ok(count) = u32::try_from(piece.len()) else { continue };
+                if count < 3 {
+                    continue;
+                }
+                for p in &piece {
+                    let down = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                    mesh.colored_vertex(*p, light.gamma_multiply(strength * profile(*p) * (1.0 - 0.45 * down)));
+                }
+                for i in 1..count - 1 {
+                    mesh.add_triangle(first, first + i, first + i + 1);
+                }
+            }
+        }
+        (!mesh.is_empty()).then_some(mesh)
+    }
+
+    /// An embossed line in `color` filling `rect` (a tab's colour line): the colour, a light
+    /// highlight along its top and a darker edge along its bottom, as if pressed into the glass.
+    pub fn paint_emboss(self, painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+        if !rect.is_finite() || rect.width() < 2.0 || rect.height() < 1.0 {
+            return;
+        }
+        let corner = (rect.height() * 0.5).round() as u8;
+        painter.rect_filled(rect, corner, color);
+        let [r, g, b, a] = color.to_srgba_unmultiplied();
+        let deeper = |c: u8| (f32::from(c) * 0.6).round() as u8;
+        painter.hline(
+            rect.x_range().shrink(1.0),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(deeper(r), deeper(g), deeper(b), a)),
+        );
+        painter.hline(rect.x_range().shrink(1.0), rect.top() + 0.5, Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.7)));
+    }
+
+    /// A glass theme's highlighted row (`Tokens::paint_highlight`): the fill, lit from the top
+    /// by a white gradient that fades out towards the bottom, inside a slightly deeper border.
+    pub fn paint_highlight(self, painter: &egui::Painter, rect: egui::Rect, radius: egui::CornerRadius, fill: Color32) {
+        painter.rect_filled(rect, radius, fill);
+        if !rect.is_finite() || rect.height() < 4.0 || rect.width() < 4.0 {
+            return;
+        }
+        let mut path = Vec::new();
+        egui::epaint::tessellator::path::rounded_rectangle(&mut path, rect, radius.into());
+        let light = |y: f32| Color32::WHITE.gamma_multiply(0.5 * (1.0 - ((y - rect.top()) / rect.height()).clamp(0.0, 1.0)));
+        fan(painter, rect.center(), light(rect.center().y), path, |p| light(p.y));
+        let [r, g, b, a] = fill.to_srgba_unmultiplied();
+        let deeper = |c: u8| (f32::from(c) * 0.8).round() as u8;
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(deeper(r), deeper(g), deeper(b), a)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    /// The glossy face of a glass theme's buttons (`Tokens::button_bevel`): the top half
+    /// brighter, fading towards a soft split across the middle, inside the button's corners.
+    /// Dimmer while pressed or on, fainter when disabled. Paint only; too small: nothing.
+    pub fn paint_gloss(self, painter: &egui::Painter, rect: egui::Rect, radius: impl Into<egui::CornerRadius>, pressed: bool, enabled: bool) {
+        if !rect.is_finite() || rect.height() < 8.0 || rect.width() < 8.0 || self.sheen.a() == 0 {
+            return;
+        }
+        let strength = match (enabled, pressed) {
+            (false, _) => 0.25,
+            (true, true) => 0.35,
+            (true, false) => 0.75,
+        };
+        let radius: egui::CornerRadius = radius.into();
+        let mut path = Vec::new();
+        egui::epaint::tessellator::path::rounded_rectangle(&mut path, rect, radius.into());
+        let split = rect.center().y;
+        // The outline's lower half folds up onto the split: the top half's rounded outline.
+        let face = |y: f32| self.sheen.gamma_multiply(strength * (0.3 + 0.7 * ((split - y) / (split - rect.top())).clamp(0.0, 1.0)));
+        let outline = path.into_iter().map(|p| egui::pos2(p.x, p.y.min(split))).collect();
+        fan(painter, egui::pos2(rect.center().x, split), face(split), outline, |p| face(p.y));
+    }
+}
+
+/// How far the light streaks lean: across per down.
+const STREAK_SLANT: f32 = 0.9;
+/// The share of a streak's width over which each edge fades in or out.
+const STREAK_EDGE: f32 = 0.35;
+/// How far the light streaks drift as the light moves to the window's edge.
+const STREAK_DRIFT: f32 = 48.0;
+
+/// A convex polygon cut to one side of a vertical line (`keep_right`: keep `x >= at`).
+fn clip_x(points: &[egui::Pos2], at: f32, keep_right: bool) -> Vec<egui::Pos2> {
+    let inside = |p: egui::Pos2| if keep_right { p.x >= at } else { p.x <= at };
+    let mut out = Vec::with_capacity(points.len() + 2);
+    for (i, p) in points.iter().enumerate() {
+        let Some(q) = points.get((i + 1) % points.len()) else { continue };
+        if inside(*p) {
+            out.push(*p);
+        }
+        if inside(*p) != inside(*q) && (q.x - p.x).abs() > f32::EPSILON {
+            let t = (at - p.x) / (q.x - p.x);
+            out.push(egui::pos2(at, p.y + (q.y - p.y) * t));
+        }
+    }
+    out
+}
+
+/// A square bubble's tile and corner radius for a bubble of `radius` at `center`.
+fn tile(center: egui::Pos2, radius: f32) -> (egui::Rect, u8) {
+    let corner = (radius * 0.3).round().clamp(2.0, 12.0) as u8;
+    (egui::Rect::from_center_size(center, egui::vec2(radius * 2.0, radius * 2.0)), corner)
+}
+
+/// Points round a rounded rectangle, for the tiles' gradients.
+fn outline(rect: egui::Rect, corner: egui::CornerRadius) -> Vec<egui::Pos2> {
+    let mut path = Vec::new();
+    egui::epaint::tessellator::path::rounded_rectangle(&mut path, rect, corner.into());
+    path
+}
+
+/// Corners `by` points tighter, for an outline inside another.
+fn shrunk(corner: egui::CornerRadius, by: u8) -> egui::CornerRadius {
+    egui::CornerRadius {
+        nw: corner.nw.saturating_sub(by),
+        ne: corner.ne.saturating_sub(by),
+        sw: corner.sw.saturating_sub(by),
+        se: corner.se.saturating_sub(by),
+    }
+}
+
+/// Points round an ellipse, for the bubbles' gradients.
+fn ellipse(center: egui::Pos2, radii: egui::Vec2) -> Vec<egui::Pos2> {
+    const STEPS: usize = 40;
+    (0..STEPS)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / STEPS as f32;
+            egui::pos2(center.x + radii.x * a.cos(), center.y + radii.y * a.sin())
+        })
+        .collect()
+}
+
+/// A convex outline filled as a fan from `hub`, each outline point coloured by `color`.
+fn fan(painter: &egui::Painter, hub: egui::Pos2, hub_color: Color32, outline: Vec<egui::Pos2>, color: impl Fn(egui::Pos2) -> Color32) {
+    let Ok(count) = u32::try_from(outline.len()) else {
+        return;
+    };
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(hub, hub_color);
+    for point in outline {
+        mesh.colored_vertex(point, color(point));
+    }
+    for i in 0..count {
+        mesh.add_triangle(0, i + 1, (i + 1) % count + 1);
+    }
+    painter.add(mesh);
 }
 
 /// Two directional edge bands, shared by raised chrome and recessed editors.
@@ -121,6 +536,7 @@ impl Borders {
         control: None,
         primary_inset: None,
         bevel: None,
+        glass: None,
     };
 
     pub fn stroke(self, role: BorderRole, fallback: Stroke) -> Stroke {
@@ -147,17 +563,64 @@ impl Tokens {
         }
     }
 
+    /// A button's bubble in a theme with bubbles, behind the icon and label the caller draws
+    /// next; then `Bubbled::finish`. A tile fills the whole of `rect` (icon and label), with the
+    /// theme's control corners; an orb sits inside it. `None`: the theme has no bubbles, and the
+    /// button keeps its own fill.
+    pub fn bubble(&self, painter: &egui::Painter, rect: egui::Rect, tint: Color32, state: Bubble) -> Option<Bubbled> {
+        let glass = self.borders.glass.filter(|glass| glass.bubbles.is_some())?;
+        let bubbled = Bubbled { glass, center: rect.center(), radius: rect.width().min(rect.height()) * 0.5, state };
+        match glass.bubbles {
+            Some(BubbleShape::Square) => glass.paint_tile(painter, rect, egui::CornerRadius::same(self.control_radius), tint, state),
+            _ => glass.paint_bubble(painter, bubbled.center, bubbled.radius, tint, state),
+        }
+        Some(bubbled)
+    }
+
+    /// One segment of a joined group of buttons (the window's caption buttons) in a theme with
+    /// square bubbles: a tile with the `corner`s the group gives it, so the segments meet in one
+    /// strip. Returns whether it painted; otherwise the caller uses `bubble` or its own fill.
+    pub fn tile_segment(&self, painter: &egui::Painter, rect: egui::Rect, corner: egui::CornerRadius, tint: Color32, state: Bubble) -> bool {
+        match self.borders.glass.filter(|glass| glass.bubbles == Some(BubbleShape::Square)) {
+            Some(glass) => {
+                glass.paint_tile(painter, rect, corner, tint, state);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A highlighted row or item (under the pointer, selected, open): a flat `fill`, or in a glass
+    /// theme a soft top-lit gradient of it with a slightly deeper border (`Glass::paint_highlight`).
+    /// Hover and selection fills paint through this so a theme can restyle all of them at once.
+    pub fn paint_highlight(&self, painter: &egui::Painter, rect: egui::Rect, radius: impl Into<egui::CornerRadius>, fill: Color32) {
+        let radius = radius.into();
+        match self.borders.glass {
+            Some(glass) => glass.paint_highlight(painter, rect, radius, fill),
+            None => {
+                painter.rect_filled(rect, radius, fill);
+            }
+        }
+    }
+
     pub fn button_bevel(&self, ui: &egui::Ui, response: &egui::Response, selected: bool) {
         self.button_bevel_with_radius(ui, response, selected, self.control_radius);
     }
 
     /// Compound controls supply the same corner geometry as their selected fill.
     pub fn button_bevel_with_radius(&self, ui: &egui::Ui, response: &egui::Response, selected: bool, radius: impl Into<egui::CornerRadius>) {
-        if let Some(bevel) = self.borders.bevel {
-            let pressed = response.enabled()
+        let pressed = || {
+            response.enabled()
                 && (response.is_pointer_button_down_on()
-                    || (response.has_focus() && ui.input(|i| i.key_down(egui::Key::Space) || i.key_down(egui::Key::Enter))));
-            bevel.paint(ui.painter(), response.rect, radius, selected || pressed, response.enabled());
+                    || (response.has_focus() && ui.input(|i| i.key_down(egui::Key::Space) || i.key_down(egui::Key::Enter))))
+        };
+        let radius: egui::CornerRadius = radius.into();
+        if let Some(bevel) = self.borders.bevel {
+            bevel.paint(ui.painter(), response.rect, radius, selected || pressed(), response.enabled());
+        }
+        // A glass theme's buttons are glossy (`Glass::paint_gloss`).
+        if let Some(glass) = self.borders.glass {
+            glass.paint_gloss(ui.painter(), response.rect.shrink(1.0), radius, selected || pressed(), response.enabled());
         }
     }
 
@@ -239,6 +702,123 @@ pub fn set_logo_accent(on: bool) -> bool {
     LOGO_ACCENT.with(|c| c.replace(on) != on)
 }
 
+/// The user's own adjustments over a theme (Preferences › Interface › Colour and glass): a base
+/// colour and how strongly it tints, and a glass theme's opacity and gloss. `None`: the theme's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Personal {
+    pub color: Option<Color32>,
+    pub intensity: f32,
+    pub opacity: Option<f32>,
+    pub gloss: Option<f32>,
+    pub menu_opacity: Option<f32>,
+    pub menu_shadow: Option<f32>,
+    /// The 3D view's background gradient, top and bottom, in place of the theme's.
+    pub sky: Option<[Color32; 2]>,
+}
+
+impl Personal {
+    /// Nothing over the theme's own.
+    pub fn is_empty(&self) -> bool {
+        self.color.is_none()
+            && self.opacity.is_none()
+            && self.gloss.is_none()
+            && self.menu_opacity.is_none()
+            && self.menu_shadow.is_none()
+            && self.sky.is_none()
+    }
+}
+
+/// The surfaces the base colour tints, with the ink read on each and how much of the tint it
+/// takes at full intensity: the title bar most, panels and dialogs gently.
+macro_rules! tinted_surfaces {
+    ($t:ident, $tint:expr, $k:expr, [$($fill:ident on $ink:ident * $share:expr),* $(,)?]) => {
+        $( $t.$fill = readable_mix($t.$fill, $tint, $k * $share, $t.$ink); )*
+    };
+}
+
+impl Tokens {
+    /// These tokens with the user's own base colour and glass over them. Text stays readable:
+    /// a surface takes less of the tint where its text would read worse than 4.5:1 (or than it
+    /// did, if the theme's own was lower).
+    pub fn personalised(mut self, p: Personal) -> Tokens {
+        if let Some(tint) = p.color {
+            let k = if p.intensity.is_finite() { p.intensity.clamp(0.0, 1.0) } else { 0.0 };
+            tinted_surfaces!(self, tint, k, [
+                app_bar on app_bar_text * 0.85,
+                app_bar_tab_active on app_bar_text * 0.3,
+                toolbar on text * 0.3,
+                panel on text * 0.3,
+                panel_header on text * 0.35,
+                timeline on text * 0.3,
+                dialog_bg on dialog_label * 0.3,
+                dialog_body on dialog_label * 0.25,
+                dialog_footer on dialog_label * 0.3,
+                overlay on text * 0.3,
+            ]);
+        }
+        if let Some([top, bottom]) = p.sky {
+            (self.viewport_top, self.viewport_bottom) = (top, bottom);
+            // The window's title bar follows the background's top, its text kept readable: a
+            // colour too strong for it is lightened or darkened first, so it still shows.
+            self.app_bar = readable_mix(self.app_bar, readable_shade(top, self.app_bar_text), 0.75, self.app_bar_text);
+        }
+        if let Some(glass) = self.borders.glass.as_mut() {
+            if let Some(opacity) = p.opacity.filter(|v| v.is_finite()) {
+                glass.opacity = opacity.clamp(0.3, 1.0);
+            }
+            if let Some(menu) = p.menu_opacity.filter(|v| v.is_finite()) {
+                glass.menu_opacity = Some(menu.clamp(0.3, 1.0));
+            }
+            if let Some(shadow) = p.menu_shadow.filter(|v| v.is_finite()) {
+                glass.menu_shadow = Some(shadow.clamp(0.0, 1.0));
+            }
+            if let Some(gloss) = p.gloss.filter(|v| v.is_finite()) {
+                let [r, g, b, _] = glass.sheen.to_srgba_unmultiplied();
+                glass.sheen = Color32::from_rgba_unmultiplied(r, g, b, (gloss.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+        self
+    }
+}
+
+/// `base` mixed towards `tint` by `amount`, keeping `base`'s alpha, and backed off until `ink`
+/// reads on it at least as well as 4.5:1 (or as on `base`, if that was lower).
+fn readable_mix(base: Color32, tint: Color32, amount: f32, ink: Color32) -> Color32 {
+    let [r, g, b, a] = base.to_srgba_unmultiplied();
+    let opaque = Color32::from_rgb(r, g, b);
+    let floor = contrast_ratio(ink, opaque).min(4.5) - 1e-6;
+    let mut amount = amount.clamp(0.0, 1.0);
+    for _ in 0..16 {
+        let mixed = opaque.lerp_to_gamma(tint, amount);
+        if contrast_ratio(ink, mixed) >= floor {
+            return Color32::from_rgba_unmultiplied(mixed.r(), mixed.g(), mixed.b(), a);
+        }
+        amount *= 0.75;
+    }
+    base
+}
+
+/// `color`, its hue kept, lightened (behind dark `ink`) or darkened (behind light `ink`) only as
+/// far as `ink` needs to read on it at 4.5:1.
+fn readable_shade(color: Color32, ink: Color32) -> Color32 {
+    let opaque = Color32::from_rgb(color.r(), color.g(), color.b());
+    if contrast_ratio(ink, opaque) >= 4.5 {
+        return opaque;
+    }
+    // The middle of the luminance range in contrast terms: darker ink reads on lighter colours.
+    let toward = if luminance(Color32::from_rgb(ink.r(), ink.g(), ink.b())) < 0.18 { Color32::WHITE } else { Color32::BLACK };
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let middle = (low + high) * 0.5;
+        if contrast_ratio(ink, opaque.lerp_to_gamma(toward, middle)) >= 4.5 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    opaque.lerp_to_gamma(toward, high)
+}
+
 /// Isolated widget tests restore the thread's theme even when an assertion fails.
 #[cfg(test)]
 pub(crate) fn scoped_tokens(tokens: Tokens) -> impl Drop {
@@ -262,6 +842,79 @@ pub(crate) struct TabAccent {
     pub soft: Color32,
 }
 
+/// Every ribbon tab that can be given a colour of its own (Preferences), as the ribbon names it:
+/// its pill, its line, its soft selections and, with icons following their tab, its icons.
+/// The application's own accent (title bar, workspace buttons) never changes with it.
+pub const COLOURED_TABS: &[(&str, &str)] = &[
+    ("MODEL", "Model"),
+    ("SURFACE", "Surface"),
+    ("ASSEMBLE", "Assemble"),
+    ("INSERT", "Insert"),
+    ("INSPECT", "Inspect"),
+    ("MANAGE", "Manage"),
+    ("VIEW", "View"),
+    ("SHEET METAL", "Sheet Metal"),
+    ("WELDMENTS", "Weldments"),
+    ("SKETCH", "Sketch"),
+    ("MESH", "Mesh"),
+    ("FORM", "Form"),
+    ("RENDER", "Render"),
+];
+
+/// The id a tab's own colour is kept under (the Render workspace's tabs share one).
+fn tab_key(tab: &str) -> &str {
+    if tab.starts_with("RENDER") { "RENDER" } else { tab }
+}
+
+thread_local! {
+    /// The window's rectangle this frame, which the light streaks span (`Tokens::screen`).
+    static SCREEN: Cell<egui::Rect> = const { Cell::new(egui::Rect::ZERO) };
+    /// Where the light comes from: the pointer's place from the window's middle, -1 to 1 each
+    /// way, smoothed (`set_light`); zero when it doesn't follow the pointer.
+    static LIGHT: Cell<egui::Vec2> = const { Cell::new(egui::Vec2::ZERO) };
+    /// The user's own tab colours (`prefs::apply`), per thread like the theme. Only tab drawing
+    /// reads them (`TabAccent::for_tab`).
+    static TAB_COLORS: Cell<Option<std::rc::Rc<std::collections::BTreeMap<String, Color32>>>> = const { Cell::new(None) };
+}
+
+impl Tokens {
+    /// The window's rectangle this frame (`set_screen`), which the light streaks span.
+    pub fn screen() -> egui::Rect {
+        SCREEN.get()
+    }
+}
+
+/// Keep the window's rectangle for the light streaks (`prefs::apply`, every frame).
+pub fn set_screen(rect: egui::Rect) {
+    SCREEN.set(rect);
+}
+
+/// Where the light comes from now (`prefs::apply`, every frame): -1 to 1 each way from the middle.
+pub fn set_light(offset: egui::Vec2) {
+    LIGHT.set(if offset.is_finite() { offset.clamp(egui::Vec2::splat(-1.0), egui::Vec2::splat(1.0)) } else { egui::Vec2::ZERO });
+}
+
+/// Where the light comes from (`set_light`): the light streaks and patterns shift with it.
+pub fn light() -> egui::Vec2 {
+    LIGHT.get()
+}
+
+/// Use the user's own tab colours (empty: the theme's). Returns whether that changed anything.
+pub fn set_tab_colors(colors: std::collections::BTreeMap<String, Color32>) -> bool {
+    let held = TAB_COLORS.take();
+    let same = held.as_deref().map_or(colors.is_empty(), |old| *old == colors);
+    TAB_COLORS.set(if same { held } else { (!colors.is_empty()).then(|| std::rc::Rc::new(colors)) });
+    !same
+}
+
+/// The user's own colour for a tab, if any.
+fn user_tab_color(tab: &str) -> Option<Color32> {
+    let held = TAB_COLORS.take();
+    let color = held.as_ref().and_then(|colors| colors.get(tab_key(tab)).copied());
+    TAB_COLORS.set(held);
+    color
+}
+
 /// Palette ramp for icons on a surface explicitly accented by its active tab.
 pub(crate) fn icon_accent_for_tab(tab: &str) -> Option<&'static str> {
     match tab {
@@ -271,6 +924,180 @@ pub(crate) fn icon_accent_for_tab(tab: &str) -> Option<&'static str> {
         "FORM" => Some("form"),
         _ => None,
     }
+}
+
+/// A colour on its way to `target` over `seconds`, channel by channel, from where it was last
+/// asked for under `id` (the first time, `target` itself).
+pub fn shifting(ctx: &egui::Context, id: &str, target: Color32, seconds: f32) -> Color32 {
+    let channel = |i: u8, v: u8| ctx.animate_value_with_time(egui::Id::new((id, i)), f32::from(v), seconds).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(channel(0, target.r()), channel(1, target.g()), channel(2, target.b()))
+}
+
+thread_local! {
+    /// The glass painted this frame, by layer (`glass_area`): the text on it gets a soft shadow
+    /// at the end of the frame (`shadow_text_on_glass`).
+    static GLASS_AREAS: std::cell::RefCell<Vec<(egui::LayerId, egui::Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How strong the halo and shadow behind text on glass are (`set_text_shadow`), 0 to 1.
+    static TEXT_SHADOW_STRENGTH: Cell<f32> = const { Cell::new(0.5) };
+}
+
+/// How strong the halo and shadow behind text on glass are (`prefs::apply`, every frame): 0 for
+/// none, 0.5 a soft glow, 1 a strong one.
+pub fn set_text_shadow(strength: f32) {
+    TEXT_SHADOW_STRENGTH.set(if strength.is_finite() { strength.clamp(0.0, 1.0) } else { 0.5 });
+}
+
+/// At most this many glass areas are kept in a frame; more are drawn without text shadows.
+const MAX_GLASS_AREAS: usize = 4096;
+
+/// Note a glass surface painted this frame, as far as its painter shows it, so the text drawn on
+/// it gets a soft shadow (`shadow_text_on_glass`).
+pub fn glass_area(painter: &egui::Painter, rect: egui::Rect) {
+    let rect = rect.intersect(painter.clip_rect());
+    if rect.is_finite() && rect.is_positive() {
+        GLASS_AREAS.with_borrow_mut(|areas| {
+            if areas.len() < MAX_GLASS_AREAS {
+                areas.push((painter.layer_id(), rect));
+            }
+        });
+    }
+}
+
+/// After a frame is drawn: the text on its glass (`glass_area`) gets a soft halo and a drop
+/// shadow behind it, so it stands out from the streaks and whatever shows through the glass. Text
+/// lighter than the glass gets a dark one, darker text a light glow. Text anywhere else, and every
+/// theme without glass, is left as it is. Forgets the frame's glass.
+pub fn shadow_text_on_glass(ctx: &egui::Context) {
+    let areas = GLASS_AREAS.take();
+    let t = Tokens::get();
+    let strength = TEXT_SHADOW_STRENGTH.get();
+    if areas.is_empty() || t.borders.glass.is_none() || strength <= 0.0 {
+        return;
+    }
+    let surface = luminance(Color32::from_rgb(t.panel.r(), t.panel.g(), t.panel.b()));
+    let mut layers: Vec<egui::LayerId> = Vec::new();
+    for (layer, _) in &areas {
+        if !layers.contains(layer) {
+            layers.push(*layer);
+        }
+    }
+    ctx.graphics_mut(|graphics| {
+        for layer in layers {
+            let glass: Vec<egui::Rect> = areas.iter().filter(|(l, _)| *l == layer).map(|(_, rect)| *rect).collect();
+            let Some(list) = graphics.get_mut(layer) else { continue };
+            let count = list.all_entries().len();
+            for i in 0..count {
+                list.mutate_shape(egui::layers::ShapeIdx(i), |clipped| shadow_text(&mut clipped.shape, &glass, surface, strength));
+            }
+        }
+    });
+}
+
+/// The soft glow behind text on glass, as rings of faint copies around a point a pixel below the
+/// text (the light falls from above): (how far out, how many copies, how strong each is at half
+/// strength, the default). Overlapping, they build up near the letters and fade outwards like a
+/// blur; at full strength each is twice as strong (`shadow_text_on_glass`).
+const TEXT_SHADOW: [(f32, usize, f32); 4] = [(0.0, 1, 0.2), (1.0, 8, 0.09), (2.0, 12, 0.05), (3.0, 16, 0.025)];
+
+/// Where the glow's copies go and how strong each is, at half strength (`TEXT_SHADOW`).
+fn text_shadow_copies() -> impl Iterator<Item = (egui::Vec2, f32)> {
+    TEXT_SHADOW.into_iter().flat_map(|(radius, count, alpha)| {
+        (0..count).map(move |i| {
+            let angle = std::f32::consts::TAU * i as f32 / count as f32;
+            (egui::vec2(radius * angle.cos(), 1.0 + radius * angle.sin()), alpha)
+        })
+    })
+}
+
+/// `shape`'s text that lies on `glass`, with its halo and shadow behind it, dark or light against
+/// `surface` (the glass's luminance) as the text is, as strong as `strength` (0 to 1)
+/// (`shadow_text_on_glass`).
+fn shadow_text(shape: &mut egui::Shape, glass: &[egui::Rect], surface: f64, strength: f32) {
+    match shape {
+        egui::Shape::Vec(shapes) => shapes.iter_mut().for_each(|s| shadow_text(s, glass, surface, strength)),
+        egui::Shape::Text(text) => {
+            let center = text.visual_bounding_rect().center();
+            if !glass.iter().any(|rect| rect.contains(center)) {
+                return;
+            }
+            let ink = text
+                .override_text_color
+                .or_else(|| text.galley.job.sections.first().map(|s| s.format.color))
+                .map(|c| if c == Color32::PLACEHOLDER { text.fallback_color } else { c })
+                .unwrap_or(text.fallback_color);
+            if ink.a() == 0 {
+                return;
+            }
+            // Twice the table's strength at full strength; fainter text, a fainter shadow.
+            let scale = 2.0 * strength * f32::from(ink.a()) / 255.0;
+            let behind = if luminance(Color32::from_rgb(ink.r(), ink.g(), ink.b())) > surface { Color32::BLACK } else { Color32::WHITE };
+            let mut shapes: Vec<egui::Shape> = text_shadow_copies()
+                .map(|(offset, alpha)| {
+                    let mut copy = text.clone();
+                    copy.pos += offset;
+                    copy.override_text_color = Some(behind.gamma_multiply((alpha * scale).min(1.0)));
+                    copy.underline = Stroke::NONE;
+                    egui::Shape::Text(copy)
+                })
+                .collect();
+            shapes.push(std::mem::replace(shape, egui::Shape::Noop));
+            *shape = egui::Shape::Vec(shapes);
+        }
+        _ => {}
+    }
+}
+
+/// The sky's colour through a day, round the clock: the hour each colour is at its fullest, from
+/// midnight's indigo through dawn's rose, the morning's and midday's blues, the late afternoon's
+/// gold and dusk's coral to twilight's purple. Between two the colour shifts gradually.
+const DAYLIGHT: [(f32, [u8; 3]); 8] = [
+    (0.0, [38, 46, 104]),
+    (5.0, [86, 70, 140]),
+    (6.5, [240, 150, 120]),
+    (9.0, [120, 190, 240]),
+    (13.0, [70, 160, 230]),
+    (17.5, [245, 180, 90]),
+    (19.5, [220, 100, 120]),
+    (21.0, [100, 70, 150]),
+];
+
+/// The sky's colour at `hours` past midnight (`DAYLIGHT`), for colours that follow the time of
+/// day. Any hour is taken round the clock; one that isn't a number is midday.
+pub fn daylight(hours: f32) -> Color32 {
+    let hours = if hours.is_finite() { hours.rem_euclid(24.0) } else { 12.0 };
+    let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let next = DAYLIGHT.iter().position(|(at, _)| *at > hours).unwrap_or(DAYLIGHT.len());
+    let (from, from_rgb) = DAYLIGHT[(next + DAYLIGHT.len() - 1) % DAYLIGHT.len()];
+    let (to, to_rgb) = DAYLIGHT.get(next).copied().unwrap_or((24.0, DAYLIGHT[0].1));
+    let along = if to > from { (hours - from) / (to - from) } else { 0.0 };
+    rgb(from_rgb).lerp_to_gamma(rgb(to_rgb), along.clamp(0.0, 1.0))
+}
+
+/// `color` with the lightness of `reference`, its hue kept: mixed towards white or black until
+/// its relative luminance matches, so strong and pale colours come out equally strong.
+pub fn with_lightness_of(color: Color32, reference: Color32) -> Color32 {
+    let target = luminance(reference);
+    let own = luminance(color);
+    let toward = if own < target { Color32::WHITE } else { Color32::BLACK };
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let middle = (low + high) * 0.5;
+        if (luminance(color.lerp_to_gamma(toward, middle)) < target) == (own < target) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    color.lerp_to_gamma(toward, (low + high) * 0.5)
+}
+
+/// Relative luminance of an opaque sRGB colour (WCAG).
+fn luminance(c: Color32) -> f64 {
+    let linear = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
 }
 
 /// WCAG contrast of two opaque sRGB colours.
@@ -285,15 +1112,23 @@ pub(crate) fn contrast_ratio(a: Color32, b: Color32) -> f64 {
 
 impl TabAccent {
     pub fn for_tab(t: &Tokens, tab: &str) -> Self {
-        let (color, ink, soft) = match tab {
-            "SKETCH" => (t.sketch_accent, t.sketch_ink, t.sketch_soft),
-            "SURFACE" => (t.surface_fill, t.surface_ink, t.surface_soft),
-            "MESH" => (t.mesh_fill, t.mesh_ink, t.mesh_soft),
-            "FORM" => (t.form_fill, t.form_tab_ink, t.form_soft),
-            "SHEET METAL" => (t.sheet_fill, t.sheet_ink, t.sheet_soft),
-            "RENDER" | "RENDER APPEARANCE" | "RENDER SCENE" | "RENDER CAMERA" => (t.render_fill, t.render_ink, t.render_soft),
-            // Model and shared utility tabs retain their existing selection exactly.
-            _ => (t.accent, t.selected_ink, t.accent_soft),
+        let user = user_tab_color(tab).map(|color| {
+            let [r, g, b, _] = t.panel.to_srgba_unmultiplied();
+            (color, color, Color32::from_rgb(r, g, b).lerp_to_gamma(color, 0.2))
+        });
+        let (color, ink, soft) = if let Some(user) = user {
+            user
+        } else {
+            match tab {
+                "SKETCH" => (t.sketch_accent, t.sketch_ink, t.sketch_soft),
+                "SURFACE" => (t.surface_fill, t.surface_ink, t.surface_soft),
+                "MESH" => (t.mesh_fill, t.mesh_ink, t.mesh_soft),
+                "FORM" => (t.form_fill, t.form_tab_ink, t.form_soft),
+                "SHEET METAL" => (t.sheet_fill, t.sheet_ink, t.sheet_soft),
+                "RENDER" | "RENDER APPEARANCE" | "RENDER SCENE" | "RENDER CAMERA" => (t.render_fill, t.render_ink, t.render_soft),
+                // Model and shared utility tabs retain their existing selection exactly.
+                _ => (t.accent, t.selected_ink, t.accent_soft),
+            }
         };
         let ink = if contrast_ratio(ink, soft) >= 4.5 {
             ink
@@ -330,11 +1165,39 @@ impl TabAccent {
         ctx.data(|d| d.get_temp::<Option<&'static str>>(egui::Id::new("sc_tab_icon_accent"))).flatten()
     }
 
+    /// With icons following their tab's colour (Preferences), the ramp the active tab's icons
+    /// take (`None`: the base ramp) and the palette they are drawn with: the theme's, with that
+    /// ramp made from the tab's colour where the tab has a colour of its own. `None`: icons keep
+    /// their own colours. Only icons on the ribbon use this palette (`icons::paint_on_tab`).
+    pub fn tab_icons(ctx: &egui::Context) -> Option<(Option<&'static str>, crate::icon_svg::Palette)> {
+        ctx.data(|d| d.get_temp::<Option<(Option<&'static str>, crate::icon_svg::Palette)>>(egui::Id::new("sc_tab_icons"))).flatten()
+    }
+
+    /// The active tab's icon ramp and palette (`tab_icons`).
+    fn tab_icon_palette(tab: &str) -> (Option<&'static str>, crate::icon_svg::Palette) {
+        let t = Tokens::get();
+        let own = icon_accent_for_tab(tab);
+        let color = Self::for_tab(&t, tab).color;
+        let mut palette = t.icon_palette.unwrap_or_default();
+        // A colour of the user's, or a tab of the theme's own colour without a ramp for it
+        // (Sheet Metal): its ramp is made from that colour, pale, medium and strong.
+        let recolour = user_tab_color(tab).or_else(|| (own.is_none() && color != t.accent).then_some(color));
+        if let Some(color) = recolour {
+            let slot = own.and_then(crate::icon_svg::accent_index).map_or(0, |i| i + 1);
+            let rgb = |c: Color32| [c.r(), c.g(), c.b()];
+            if let Some(ramp) = palette.accents.get_mut(slot) {
+                *ramp = Some([rgb(color.lerp_to_gamma(Color32::WHITE, 0.78)), rgb(color.lerp_to_gamma(Color32::WHITE, 0.3)), rgb(color)]);
+            }
+        }
+        (own, palette)
+    }
+
     pub fn publish(app: &crate::SolveApp, ctx: &egui::Context) {
         let accent = Self::for_tab(&Tokens::get(), &app.ui.tab);
         ctx.data_mut(|d| {
             d.insert_temp(egui::Id::new("sc_tab_accent"), accent);
             d.insert_temp(egui::Id::new("sc_tab_icon_accent"), icon_accent_for_tab(&app.ui.tab));
+            d.insert_temp(egui::Id::new("sc_tab_icons"), app.preferences.tab_colored_icons.then(|| Self::tab_icon_palette(&app.ui.tab)));
             d.insert_temp(egui::Id::new("sc_sketch_open"), app.session.active_sketch.is_some());
             d.insert_temp(egui::Id::new("sc_tool_accent"), app.tool.is_some() || app.dialog.is_some());
         });
@@ -1042,6 +1905,12 @@ fn visuals(dark: bool) -> egui::Visuals {
         widget.corner_radius = egui::CornerRadius::same(t.radius_sm / 2);
     }
     v.widgets.hovered.corner_radius = egui::CornerRadius::same(t.radius_sm.saturating_sub(1));
+    // egui's own popups and windows (lists, tooltips) are glass too, as `Container` surfaces are.
+    if let Some(glass) = t.borders.glass {
+        v.window_fill = glass.menu_fill(v.window_fill);
+        v.window_shadow = egui::Shadow::NONE;
+        v.popup_shadow = glass.menu_shadow();
+    }
     v
 }
 
@@ -1061,6 +1930,194 @@ pub fn apply(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bubbles_stay_inside_their_shape_shine_at_the_top_and_brighten_with_their_state() {
+        use super::*;
+        for shape in [BubbleShape::Round, BubbleShape::Square] {
+            let glass =
+                Glass { opacity: 0.7, sheen: Color32::WHITE, sheen_height: 30.0, bubbles: Some(shape), menu_opacity: None, menu_shadow: None };
+            let ctx = crate::fonts::test_context();
+            let (center, radius) = (egui::pos2(100.0, 100.0), 18.0);
+            let paint = |center: egui::Pos2, radius: f32, state: Bubble| {
+                let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| {
+                    glass.paint_bubble(ui.painter(), center, radius, Color32::from_rgb(10, 120, 194), state);
+                    glass.paint_bubble_gloss(ui.painter(), center, radius, state);
+                });
+                let mut vertices = Vec::new();
+                for shape in &output.shapes {
+                    crate::test_support::each_shape(&shape.shape, &mut |shape| {
+                        if let egui::Shape::Mesh(mesh) = shape {
+                            vertices.extend(mesh.vertices.iter().map(|v| (v.pos, v.color)));
+                        }
+                    });
+                }
+                (output.shapes.len(), vertices)
+            };
+            let nothing = crate::test_support::frame(&ctx, egui::RawInput::default(), |_| {}).shapes.len();
+            let (shapes, vertices) = paint(center, radius, Bubble::Rest);
+            assert!(shapes >= nothing + 4, "body, glow, highlight and rim");
+            let inside = |p: egui::Pos2| match shape {
+                BubbleShape::Round => p.distance(center) <= radius + 0.01,
+                BubbleShape::Square => (p.x - center.x).abs() <= radius + 0.01 && (p.y - center.y).abs() <= radius + 0.01,
+            };
+            assert!(vertices.iter().all(|(p, _)| inside(*p)), "{shape:?}: the gradients stay inside the bubble");
+            let brightest = vertices.iter().max_by_key(|(_, c)| c.a()).map(|(p, _)| *p).unwrap();
+            assert!(brightest.y < center.y, "the highlight is in the top half: {brightest:?}");
+            let alpha = |state| paint(center, radius, state).1.iter().map(|(_, c)| u32::from(c.a())).sum::<u32>();
+            assert!(alpha(Bubble::Disabled) < alpha(Bubble::Rest) && alpha(Bubble::Rest) < alpha(Bubble::Hover), "a hovered bubble shines more");
+            for (center, radius) in [(center, 2.0), (center, f32::NAN), (egui::pos2(f32::INFINITY, 0.0), radius)] {
+                assert_eq!(paint(center, radius, Bubble::Hover).0, nothing, "{center:?} {radius}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_base_colour_tints_surfaces_keeping_text_readable_and_glass_follows_the_sliders() {
+        use super::*;
+        for base in [Tokens::light(), Tokens::dark(), crate::theme_files::resolve(crate::theme_files::find("frutiger-aero", &[]).unwrap())] {
+            assert_eq!(base.personalised(Personal::default()), base, "nothing set: the theme's own");
+            for tint in [Color32::from_rgb(0xcc, 0x33, 0x55), Color32::BLACK, Color32::WHITE, Color32::from_rgb(0x20, 0xa0, 0x40)] {
+                let t = base.personalised(Personal { color: Some(tint), intensity: 1.0, ..Default::default() });
+                assert_ne!(t.app_bar, base.app_bar, "the title bar takes the colour");
+                for (fill, ink, before) in [
+                    (t.app_bar, t.app_bar_text, base.app_bar),
+                    (t.panel, t.text, base.panel),
+                    (t.toolbar, t.text, base.toolbar),
+                    (t.dialog_body, t.dialog_label, base.dialog_body),
+                ] {
+                    let floor = contrast_ratio(ink, before).min(4.5) - 1e-6;
+                    assert!(contrast_ratio(ink, fill) >= floor, "{tint:?}: {ink:?} on {fill:?}");
+                }
+                assert_eq!(t.overlay.a(), base.overlay.a(), "translucent surfaces keep their alpha");
+                let none = base.personalised(Personal { color: Some(tint), intensity: 0.0, ..Default::default() });
+                assert_eq!(none.app_bar, base.app_bar, "no intensity: no tint");
+            }
+        }
+        let aero = crate::theme_files::resolve(crate::theme_files::find("frutiger-aero", &[]).unwrap());
+        let glass = aero.personalised(Personal { opacity: Some(0.9), gloss: Some(0.2), ..Default::default() }).borders.glass.unwrap();
+        assert_eq!((glass.opacity, glass.sheen.a()), (0.9, 51));
+        let clamped = aero.personalised(Personal { opacity: Some(0.0), gloss: Some(f32::NAN), ..Default::default() }).borders.glass.unwrap();
+        assert_eq!((clamped.opacity, clamped.sheen), (0.3, aero.borders.glass.unwrap().sheen));
+        assert!(Tokens::light().personalised(Personal { opacity: Some(0.5), ..Default::default() }).borders.glass.is_none(), "no glass to change");
+    }
+
+    #[test]
+    fn tiles_fill_the_whole_button_with_their_gloss_above_the_middle_and_segments_join() {
+        use super::*;
+        let ctx = crate::fonts::test_context();
+        let glass = Glass {
+            opacity: 0.7,
+            sheen: Color32::WHITE,
+            sheen_height: 30.0,
+            bubbles: Some(BubbleShape::Square),
+            menu_opacity: None,
+            menu_shadow: None,
+        };
+        // A ribbon button with its label: wider and taller than its icon.
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(64.0, 58.0));
+        let shapes = |paint: &dyn Fn(&egui::Painter)| {
+            let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| paint(ui.painter()));
+            let mut out = Vec::new();
+            for shape in &output.shapes {
+                crate::test_support::each_shape(&shape.shape, &mut |shape| out.push(shape.clone()));
+            }
+            out
+        };
+        let tile = shapes(&|p| glass.paint_tile(p, rect, egui::CornerRadius::same(4), Color32::from_rgb(10, 120, 194), Bubble::Hover));
+        assert!(tile.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.rect == rect)), "the tile is the whole button");
+        let vertices: Vec<_> =
+            tile.iter().filter_map(|s| if let egui::Shape::Mesh(m) = s { Some(m.vertices.clone()) } else { None }).flatten().collect();
+        assert!(vertices.iter().all(|v| rect.expand(0.01).contains(v.pos)), "inside the tile");
+        let brightest = vertices.iter().max_by_key(|v| v.color.a()).unwrap();
+        assert!(brightest.pos.y < rect.center().y, "the gloss is over the top half");
+        assert!(
+            shapes(&|p| glass.paint_tile(
+                p,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 4.0)),
+                egui::CornerRadius::ZERO,
+                Color32::RED,
+                Bubble::Rest
+            ))
+            .is_empty()
+        );
+        // A tile's gloss is already under its icon: nothing to finish over it.
+        assert!(shapes(&|p| glass.paint_bubble_gloss(p, rect.center(), 20.0, Bubble::Hover)).is_empty());
+
+        // Joined segments paint only with square tiles; otherwise the caller falls back.
+        let mut t = Tokens::light();
+        let corner = egui::CornerRadius { nw: 0, ne: 0, sw: 6, se: 0 };
+        assert!(shapes(&|p| assert!(!t.tile_segment(p, rect, corner, Color32::RED, Bubble::Rest))).is_empty());
+        t.borders.glass = Some(Glass { bubbles: Some(BubbleShape::Round), ..glass });
+        assert!(shapes(&|p| assert!(!t.tile_segment(p, rect, corner, Color32::RED, Bubble::Rest))).is_empty());
+        t.borders.glass = Some(glass);
+        let segment = shapes(&|p| assert!(t.tile_segment(p, rect, corner, Color32::RED, Bubble::Rest)));
+        assert!(segment.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.rect == rect && r.corner_radius == corner)), "the group's corners");
+    }
+
+    #[test]
+    fn highlights_stay_flat_without_glass_and_are_top_lit_with_it() {
+        use super::*;
+        let ctx = crate::fonts::test_context();
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(120.0, 24.0));
+        let fill = Color32::from_rgb(0xca, 0xe6, 0xfb);
+        let shapes = |t: Tokens| {
+            let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| t.paint_highlight(ui.painter(), rect, 4u8, fill));
+            let mut out = Vec::new();
+            for shape in &output.shapes {
+                crate::test_support::each_shape(&shape.shape, &mut |shape| out.push(shape.clone()));
+            }
+            out
+        };
+        let flat = shapes(Tokens::light());
+        assert!(
+            matches!(flat.as_slice(), [egui::Shape::Rect(r)] if r.rect == rect && r.fill == fill && r.stroke.is_empty()),
+            "exactly the flat fill: {flat:?}"
+        );
+        let mut glassy = Tokens::light();
+        glassy.borders.glass =
+            Some(Glass { opacity: 0.7, sheen: Color32::WHITE, sheen_height: 30.0, bubbles: None, menu_opacity: None, menu_shadow: None });
+        let lit = shapes(glassy);
+        let mesh = lit.iter().find_map(|s| if let egui::Shape::Mesh(m) = s { Some(m.clone()) } else { None }).expect("the top light");
+        let alpha_at = |top: bool| {
+            mesh.vertices.iter().filter(|v| (v.pos.y - if top { rect.top() } else { rect.bottom() }).abs() < 0.01).map(|v| v.color.a()).max()
+        };
+        assert!(alpha_at(true) > alpha_at(false), "lit from the top");
+        assert!(lit.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color != fill)), "a deeper border");
+    }
+
+    #[test]
+    fn glossy_buttons_brighten_their_top_half_only_and_dim_when_pressed() {
+        use super::*;
+        let glass = Glass { opacity: 0.7, sheen: Color32::WHITE, sheen_height: 30.0, bubbles: None, menu_opacity: None, menu_shadow: None };
+        let ctx = crate::fonts::test_context();
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(80.0, 24.0));
+        let vertices = |rect: egui::Rect, pressed: bool, enabled: bool| {
+            let output =
+                crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| glass.paint_gloss(ui.painter(), rect, 4u8, pressed, enabled));
+            let mut out = Vec::new();
+            for shape in &output.shapes {
+                crate::test_support::each_shape(&shape.shape, &mut |shape| {
+                    if let egui::Shape::Mesh(mesh) = shape {
+                        out.extend(mesh.vertices.iter().map(|v| (v.pos, v.color.a())));
+                    }
+                });
+            }
+            out
+        };
+        let face = vertices(rect, false, true);
+        assert!(!face.is_empty());
+        assert!(face.iter().all(|(p, _)| rect.expand(0.01).contains(*p) && p.y <= rect.center().y + 0.01), "the top half only");
+        let top = face.iter().filter(|(p, _)| p.y < rect.top() + 1.0).map(|(_, a)| *a).max().unwrap();
+        let split = face.iter().filter(|(p, _)| (p.y - rect.center().y).abs() < 0.01).map(|(_, a)| *a).max().unwrap();
+        assert!(top > split && split > 0, "bright at the top, softer at the split: {top} {split}");
+        let sum = |v: Vec<(egui::Pos2, u8)>| v.iter().map(|(_, a)| u32::from(*a)).sum::<u32>();
+        assert!(sum(vertices(rect, true, true)) < sum(face.clone()), "dimmer while pressed");
+        assert!(sum(vertices(rect, false, false)) < sum(vertices(rect, true, true)), "fainter when disabled");
+        for tiny in [egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 4.0)), egui::Rect::NOTHING] {
+            assert!(vertices(tiny, false, true).is_empty(), "{tiny:?}");
+        }
+    }
+
     #[test]
     fn widget_states_and_popup_frames_follow_theme_radii_without_changing_defaults() {
         use super::*;
@@ -1339,5 +2396,42 @@ mod tests {
             }
         }
         super::set_viewport_dark(None);
+    }
+
+    #[test]
+    fn the_time_of_days_colour_goes_round_the_clock_without_a_jump() {
+        use super::{Color32, DAYLIGHT, daylight};
+        // Each colour at its hour, and midnight's again at the end of the day.
+        for (at, [r, g, b]) in DAYLIGHT {
+            assert_eq!(daylight(at), Color32::from_rgb(r, g, b), "{at}");
+        }
+        assert_eq!(daylight(24.0), daylight(0.0));
+        assert_eq!(daylight(-1.0), daylight(23.0), "any hour, round the clock");
+        assert_eq!(daylight(f32::NAN), daylight(12.0), "not a number: midday");
+        // Minute by minute, no step is more than a shade.
+        let mut before = daylight(0.0);
+        for minute in 1..=24 * 60 {
+            let now = daylight(minute as f32 / 60.0);
+            let step = [now.r().abs_diff(before.r()), now.g().abs_diff(before.g()), now.b().abs_diff(before.b())];
+            assert!(step.iter().all(|d| *d <= 3), "minute {minute}: {before:?} to {now:?}");
+            before = now;
+        }
+        // Night is deep and midday bright.
+        assert!(super::luminance(daylight(1.0)) < 0.05 && super::luminance(daylight(13.0)) > 0.3);
+    }
+
+    #[test]
+    fn the_title_bar_follows_a_strong_background_colour_and_its_text_stays_readable() {
+        use super::*;
+        let opaque = |c: Color32| Color32::from_rgb(c.r(), c.g(), c.b());
+        for base in [Tokens::light(), Tokens::dark()] {
+            let floor = contrast_ratio(base.app_bar_text, opaque(base.app_bar)).min(4.5) - 0.01;
+            // Night's indigo, a strong yellow and a strong red, as they are (not evened out).
+            for strong in [daylight(0.0), Color32::from_rgb(255, 230, 0), Color32::from_rgb(200, 0, 40)] {
+                let t = base.personalised(Personal { sky: Some([strong, strong]), ..Default::default() });
+                assert_ne!(t.app_bar, base.app_bar, "{strong:?} shows in the title bar");
+                assert!(contrast_ratio(t.app_bar_text, opaque(t.app_bar)) >= floor, "{strong:?}: {:?} on {:?}", t.app_bar_text, t.app_bar);
+            }
+        }
     }
 }

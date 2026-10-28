@@ -13,6 +13,7 @@ pub mod access;
 pub mod agent_chat;
 pub mod agent_cursor;
 pub mod ai_connect;
+pub mod backdrop;
 pub mod bidi;
 pub mod bom_panel;
 pub mod browser;
@@ -274,6 +275,7 @@ mod sweep_dialog_tests;
 pub(crate) mod test_boat;
 pub mod theme;
 pub mod theme_files;
+pub mod theme_layout;
 #[cfg(test)]
 mod thin_extrude_tests;
 pub mod timeline;
@@ -2363,6 +2365,8 @@ impl SolveApp {
         if self.file_picker_busy() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // Last, with everything drawn: the text on a glass theme's glass gets its soft shadow.
+        theme::shadow_text_on_glass(ui.ctx());
         control::publish_design(self, &control::DESIGN_WATCH);
         self.frame_ms = now_ms() - t0;
         frame_watch::end(self);

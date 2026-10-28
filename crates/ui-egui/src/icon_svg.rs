@@ -681,12 +681,59 @@ pub(crate) fn role_colour(name: &str, look: Look) -> egui::Color32 {
     crate::theme::icon_color([r, g, b])
 }
 
-/// The master and accent for an app icon id: an alias (with its accent), a master of that name,
-/// or the placeholder.
+/// The master and accent for an app icon id: the icon the theme on draws for it
+/// (`theme_layout`, `icons.remap`), else an alias (with its accent), a master of that name, or
+/// the placeholder. A remap is one step: the icon it names is not remapped again.
 pub fn resolve(name: &str) -> Resolved {
-    let resolved = resolve_master(name);
+    let resolved = match crate::theme_layout::icon(name) {
+        Some(other) => resolve_master(&other),
+        None => resolve_master(name),
+    };
     audit::record(name, resolved);
     resolved
+}
+
+/// Hostile-input caps for a theme's own icon drawings (`theme_layout`, `icons.pack`): bytes,
+/// tags, and how deeply groups nest (drawing them recurses).
+pub const MAX_PACK_SVG: usize = 64 * 1024;
+const MAX_PACK_TAGS: usize = 4096;
+const MAX_PACK_DEPTH: usize = 24;
+
+/// A theme's own icon drawing: the same SVG subset and palette colours as the masters (so the
+/// theme's icon palette and colour vision modes still apply), read with caps the compiled
+/// masters don't need.
+pub fn parse_untrusted(src: &str) -> Result<Doc, String> {
+    if src.len() > MAX_PACK_SVG {
+        return Err(format!("is more than {} KiB", MAX_PACK_SVG / 1024));
+    }
+    let tags = tags(src)?;
+    if tags.len() > MAX_PACK_TAGS {
+        return Err(format!("has more than {MAX_PACK_TAGS} elements"));
+    }
+    let mut depth = 0usize;
+    for tag in &tags {
+        if tag.close {
+            depth = depth.saturating_sub(1);
+        } else if !tag.selfclose {
+            depth += 1;
+            if depth > MAX_PACK_DEPTH {
+                return Err(format!("nests more than {MAX_PACK_DEPTH} levels deep"));
+            }
+        }
+    }
+    Doc::parse(src)
+}
+
+/// Whether an icon's own colour carries a meaning (a constraint's red, construction's orange), so
+/// it keeps that colour where icons otherwise follow their tab's (`icons::paint_on_tab`).
+pub(crate) fn keeps_its_colour(name: &str) -> bool {
+    let resolved = crate::theme_layout::icon(name).map_or_else(|| resolve_master(name), |other| resolve_master(&other));
+    resolved.accent.and_then(|i| ACCENT_NAMES.get(i)).is_some_and(|accent| matches!(*accent, "constraint" | "construction"))
+}
+
+/// Whether SolidCraft has an icon of that id (a master or an alias), as themes name them.
+pub fn exists(name: &str) -> bool {
+    !resolve_master(name).placeholder
 }
 
 fn resolve_master(name: &str) -> Resolved {

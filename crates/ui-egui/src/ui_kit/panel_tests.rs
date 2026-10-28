@@ -959,6 +959,7 @@ fn border_hierarchy_reaches_hosts_sections_controls_and_inset_without_new_target
             tertiary: Some(Stroke::new(0.5, Color32::GREEN)),
             container: None,
             bevel: None,
+            glass: None,
             control: Some(Stroke::new(1.5, Color32::BLUE)),
             primary_inset: Some(InsetBorder { stroke: Stroke::new(0.75, Color32::YELLOW), gap: 3.0 }),
         };
@@ -1022,6 +1023,122 @@ fn border_hierarchy_reaches_hosts_sections_controls_and_inset_without_new_target
             }
         }
     }
+}
+
+#[test]
+fn glass_surfaces_over_the_view_show_it_through_with_a_sheen_and_docked_ones_stay_opaque() {
+    use crate::shell::LayoutMode::{Docked, Floating};
+    use crate::theme::Glass;
+    let mut t = Tokens::light();
+    let glass =
+        Glass { opacity: 0.5, sheen: egui::Color32::from_white_alpha(128), sheen_height: 30.0, bubbles: None, menu_opacity: None, menu_shadow: None };
+    t.borders.glass = Some(glass);
+    let _restore = crate::theme::scoped_tokens(t);
+    let ctx = crate::fonts::test_context();
+    for (layout, surface, over_view) in [
+        (Floating, Surface::Panel, true),
+        (Floating, Surface::Feature, true),
+        (Floating, Surface::Palette, true),
+        (Floating, Surface::Chrome, true),
+        (Docked, Surface::Panel, false),
+        (Docked, Surface::Feature, false),
+        (Docked, Surface::Window, true),
+        (Docked, Surface::Popup, true),
+        (Docked, Surface::Toast, true),
+        (Docked, Surface::Navigation, true),
+        (Floating, Surface::ApplicationBar, false),
+        (Floating, Surface::Viewport, false),
+    ] {
+        let frame = Container::for_layout(layout, surface).frame(&ctx, t.panel, crate::frame::Side::Left);
+        let expected = if over_view { glass.fill(t.panel) } else { t.panel };
+        assert_eq!(frame.fill, expected, "{layout:?} {surface:?}");
+        assert!(frame.fill.a() < u8::MAX || !over_view, "{layout:?} {surface:?} lets the view through");
+        if over_view {
+            assert_eq!(frame.shadow, egui::Shadow::NONE, "{layout:?} {surface:?}: no shadow under the glass");
+        }
+    }
+    assert_eq!(Container::menu_frame().fill, glass.fill(t.dialog_body), "menus are glass");
+    {
+        // Menus, popups and notifications take the theme's menu opacity; panels its glass opacity.
+        let menus = Glass { menu_opacity: Some(0.95), ..glass };
+        let mut readable = t;
+        readable.borders.glass = Some(menus);
+        let _menus = crate::theme::scoped_tokens(readable);
+        for (surface, expected) in [
+            (Surface::Popup, menus.menu_fill(t.panel)),
+            (Surface::Toast, menus.menu_fill(t.panel)),
+            (Surface::Panel, menus.fill(t.panel)),
+            (Surface::Window, menus.fill(t.panel)),
+        ] {
+            assert_eq!(Container::for_layout(Floating, surface).frame(&ctx, t.panel, crate::frame::Side::Left).fill, expected, "{surface:?}");
+        }
+        assert_eq!(Container::menu_frame().fill, menus.menu_fill(t.dialog_body));
+        assert!(menus.menu_fill(t.panel).a() > menus.fill(t.panel).a(), "menus are more opaque than panels");
+    }
+    assert_eq!(crate::theme::Tokens::get().borders.glass, Some(glass));
+
+    // The sheen: inside the surface, brightest at its top edge, gone below `sheen_height`.
+    let rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 300.0));
+    let meshes = |paint: &dyn Fn(&egui::Painter)| {
+        let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| paint(ui.painter()));
+        let mut vertices = Vec::new();
+        for shape in &output.shapes {
+            crate::test_support::each_shape(&shape.shape, &mut |shape| {
+                if let egui::Shape::Mesh(mesh) = shape {
+                    vertices.extend(mesh.vertices.iter().map(|v| (v.pos, v.color)));
+                }
+            });
+        }
+        vertices
+    };
+    let glazed = Container::for_layout(Floating, Surface::Panel).frame(&ctx, t.panel, crate::frame::Side::Left);
+    // Painted as a host paints it: the frame, then (under its contents) the sheen.
+    let vertices = meshes(&|painter| Container::paint_frame(painter, glazed, rect.shrink(glazed.stroke.width)));
+    assert!(!vertices.is_empty(), "a glass surface has a sheen");
+    assert!(vertices.iter().all(|(pos, _)| rect.expand(0.01).contains(*pos)), "the sheen stays inside the surface");
+    assert!(vertices.iter().any(|(pos, color)| (pos.y - rect.top()).abs() < 2.0 && color.a() > 100), "bright at the top");
+    // Inside the border: the sheen fades out `sheen_height` below the stroke's inner edge.
+    let faded = rect.top() + glazed.stroke.width + 30.0;
+    assert!(vertices.iter().filter(|(pos, _)| pos.y >= faded).all(|(_, color)| color.a() == 0), "faded out below");
+    let docked = Container::for_layout(Docked, Surface::Panel).frame(&ctx, t.panel, crate::frame::Side::Left);
+    assert!(
+        meshes(&|painter| Container::paint_frame(painter, docked, rect.shrink(docked.stroke.width))).is_empty(),
+        "an opaque docked panel has none"
+    );
+    for tiny in [egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2.0, 2.0)), egui::Rect::NOTHING] {
+        assert!(meshes(&|painter| glass.paint_sheen(painter, tiny, 4u8)).is_empty(), "{tiny:?}");
+    }
+
+    // A host scrolled out of its scroll area leaves no rim or sheen behind: its decoration
+    // keeps to what clips it.
+    let mut rimmed = t;
+    rimmed.borders.primary_inset = Some(crate::theme::InsetBorder { stroke: egui::Stroke::new(1.0, egui::Color32::WHITE), gap: 0.0 });
+    let _rim = crate::theme::scoped_tokens(rimmed);
+    let scroll = egui::Rect::from_min_size(egui::pos2(0.0, 400.0), egui::vec2(300.0, 200.0));
+    let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| {
+        Container::paint_frame(&ui.painter().with_clip_rect(scroll), glazed, rect.shrink(glazed.stroke.width));
+    });
+    for shape in &output.shapes {
+        let shown = shape.clip_rect.intersect(rect);
+        assert!(!shown.is_positive() || scroll.contains_rect(shown), "drawn outside its scroll area: {:?}", shape.clip_rect);
+    }
+
+    // `show_frame` puts the sheen under the host's contents, never over its text or buttons.
+    let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| {
+        let container = Container::for_layout(Floating, Surface::Panel);
+        let frame = container.frame(ui.ctx(), t.panel, crate::frame::Side::Left).inner_margin(12);
+        container.show_frame(ui, frame, ui.max_rect(), |ui| {
+            ui.set_min_size(egui::vec2(200.0, 120.0));
+            ui.painter().rect_filled(egui::Rect::from_min_size(ui.cursor().min, egui::vec2(20.0, 20.0)), 0.0, egui::Color32::RED);
+        });
+    });
+    let order = |find: &dyn Fn(&egui::Shape) -> bool| output.shapes.iter().position(|s| find(&s.shape));
+    // The sheen (with the light streaks) fills the place reserved before the contents.
+    let sheen =
+        order(&|s| matches!(s, egui::Shape::Mesh(_)) || matches!(s, egui::Shape::Vec(v) if v.iter().any(|s| matches!(s, egui::Shape::Mesh(_)))))
+            .expect("a sheen");
+    let content = order(&|s| matches!(s, egui::Shape::Rect(r) if r.fill == egui::Color32::RED)).expect("the contents");
+    assert!(sheen < content, "the sheen is under the contents");
 }
 
 #[test]

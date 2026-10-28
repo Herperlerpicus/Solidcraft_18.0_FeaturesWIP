@@ -53,11 +53,12 @@ impl Menu {
             )
         });
         let content = |ui: &mut Ui| {
+            let glass = Container::begin_content(ui);
             ui.spacing_mut().item_spacing.y = 0.0;
             // The opening gesture belongs to the parent even when a narrow popup overlaps it.
             ui.ctx().data_mut(|d| d.insert_temp(gate_id, first_click && !released));
             let result = ui.add_enabled_ui(!opening_press, add).inner;
-            Container::finish_content(ui, frame);
+            Container::finish_content(ui, frame, glass);
             result
         };
         let popup = if nested {
@@ -153,11 +154,25 @@ pub(crate) struct MenuItem<'a> {
     pub swatch: Option<Color32>,
     pub danger: bool,
     pub submenu: bool,
+    /// A ribbon drop-down's row: its icon follows the tab's colour (`icons::paint_on_tab`).
+    pub on_tab: bool,
 }
 
 impl<'a> MenuItem<'a> {
     pub(crate) fn new(id: &'a str, label: &'a str, icon: &'a str) -> Self {
-        Self { id, label, icon, shortcut: "", enabled: true, highlighted: false, checked: None, swatch: None, danger: false, submenu: false }
+        Self {
+            id,
+            label,
+            icon,
+            shortcut: "",
+            enabled: true,
+            highlighted: false,
+            checked: None,
+            swatch: None,
+            danger: false,
+            submenu: false,
+            on_tab: false,
+        }
     }
 
     pub(crate) fn show(&self, ui: &mut Ui) -> Response {
@@ -203,7 +218,7 @@ impl<'a> MenuItem<'a> {
             painter.multiply_opacity(0.4);
         }
         if hot {
-            painter.rect_filled(r, t.control_radius, t.accent_soft);
+            t.paint_highlight(&painter, r, t.control_radius, t.accent_soft);
         }
         let icon = Rect::from_center_size(pos2(r.left() + t.control_height / 2.0, r.center().y), vec2(t.space_16, t.space_16));
         if let Some(on) = self.checked {
@@ -217,6 +232,8 @@ impl<'a> MenuItem<'a> {
                 icons::paint_danger(&painter, icon, self.icon, 1.0);
             } else if hot {
                 icons::paint_ink(&painter, icon, self.icon, dim);
+            } else if self.on_tab {
+                icons::paint_on_tab(&painter, icon, self.icon, 1.0);
             } else {
                 icons::paint_icon(&painter, icon, self.icon, 1.0);
             }

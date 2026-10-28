@@ -666,6 +666,46 @@ Optional `borders.bevel` enables this shared container/control treatment. It acc
 `shadow` and `dark_shadow` (hex colours). Missing bevel settings preserve flat
 rendering exactly. The bands paint inside existing rounded or square geometry
 without changing hit targets or allocation. Ghost controls remain borderless.
+
+Optional `borders.glass` (Frutiger Aero) makes the surfaces over the 3D view translucent.
+`Container::frame` and the shared menu frame multiply the fill of floating adaptive surfaces,
+windows and navigation cards by `opacity` (finite 0.3–1), and menus, popups and toasts by the
+optional `menu_opacity` (finite 0.3–1; absent: `opacity`), and drop their shadow (menus,
+popups and toasts cast the optional `menu_shadow` instead: finite 0–1 setting softness, offset
+and darkness together),
+which would show through; egui's own windows and popups follow through `window_fill`. Docked
+panels, the application bar, the viewport and canvas overlays stay opaque. Every translucent
+surface gets a sheen: `sheen` (hex colour) at the top edge inside the primary stroke, fading out
+over `sheen_height` (finite 0–128 points), clipped to the rounded corners. It is painted under
+the host's contents, never over its text or buttons: `show_frame` and `paint_frame` reserve its
+place themselves; a host decorated with `finish_content` reserves it with
+`Container::begin_content` before its contents. A host's sheen, bevel and inset outline keep to
+what clips the host (its scroll area, its window), so content scrolled out of view leaves nothing
+behind.
+Optional `bubbles` (`"round"` or `true`: orbs, `"square"`: tiles with rounded corners, `false`
+(default): none) replaces the flat hover and pressed fills of ribbon commands, icon-only
+navigation buttons and the title bar's buttons (Home, Save, Undo, Redo, Settings and the window's
+caption buttons, Close in the error colour), through `Tokens::bubble` and `Bubbled::finish`. A
+tile (`Glass::paint_tile`) fills the button's whole face, its icon and label, nearly touching
+its neighbours on the ribbon: a translucent body in the tab accent, a glow along its bottom, a
+gloss over its top half that fades out at the middle, and a rim, all under the icon and label.
+The window's caption buttons join in one strip of tiles hanging from the top edge
+(`Tokens::tile_segment`), rounded only at its outer bottom corners. Navigation bar tiles fill
+the whole button, menu chevron and label included, so they line up edge to edge. Hosts that
+paint their frame themselves before their contents (ribbon cards, the command search sheet) use
+`Container::painted` for the frame with its sheen. An orb
+(`Glass::paint_bubble`) sits around the icon, and `Glass::paint_bubble_gloss` covers the icon
+with a light dome. Both come in rest, hover, on (pressed or running) and disabled strengths. They paint only, inside the button's existing rectangle, and add no input target.
+The icon's SVG artwork is unchanged; a glass theme restyles it only through `icon_palette`. Labelled navigation buttons keep their
+rounded fill. With glass on, `Tokens::button_bevel` also gives shared buttons and segmented
+choices a glossy face (`Glass::paint_gloss`): their top half brighter, fading towards a soft
+split across the middle, dimmer while pressed or on and fainter when disabled; and the
+application bar gets the sheen behind its contents. Hover and selection fills paint through
+`Tokens::paint_highlight`: the flat fill as before, or with glass a soft top-lit gradient of it
+inside a slightly deeper border (menus and drop-downs, browser rows, history transport, tables,
+ribbon buttons and the workspace switcher). New highlighted rows call it instead of
+`rect_filled`, so a theme restyles them with the rest. Missing glass settings preserve opaque
+rendering exactly.
 Missing roles preserve each surface's existing width and colour, including overrides in
 `colors`; exporting keeps omitted roles absent so reimport cannot flatten those legacy
 surface differences. Dark/Light and the Gruvbox families share border geometry.

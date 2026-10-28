@@ -215,7 +215,7 @@ impl CommandSearch {
         }
         let sheet = Rect::from_min_size(origin, vec2(width, natural * progress));
         let frame = super::Menu::frame().inner_margin(0);
-        ui.painter().set(background, frame.paint(sheet.shrink(frame.stroke.width)));
+        ui.painter().set(background, super::Container::painted(ui.painter(), frame, sheet.shrink(frame.stroke.width)));
         // The edge-to-edge footer shares the card silhouette; keep the outer rule
         // above its fill, as an overflow-clipped footer would in the board.
         ui.painter().rect_stroke(sheet, t.radius_xl, frame.stroke, egui::StrokeKind::Inside);

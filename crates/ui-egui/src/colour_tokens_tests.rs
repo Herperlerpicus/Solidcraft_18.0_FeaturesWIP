@@ -157,6 +157,11 @@ const ALLOWED_LITERALS: &[(&str, usize, &str)] = &[
     ("ref_images.rs", 1, "a reference image's opacity tint"),
     ("theme_files.rs", 1, "a colour read from a theme file, which sets tokens"),
     ("titlebar.rs", 2, "the window close button's red hover (the system's convention) and white ink"),
+    (
+        "backdrop.rs",
+        7,
+        "a pattern's white light, black shade and warm glow, only mixed into the background's own colours, and a picture's opacity tint",
+    ),
     ("toolbar.rs", 1, "the version text"),
 ];
 

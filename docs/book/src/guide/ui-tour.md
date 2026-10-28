@@ -166,15 +166,54 @@ History at the bottom is unchanged.
 
 ### Colour themes
 
+At the end of Interface, **Colour and glass** sets a **Base colour** that tints the title bar, ribbon,
+panels and dialogs of any theme, and **Colour intensity** sets how strongly; text stays readable
+whatever the colour. For a glass theme such as Frutiger Aero, **Glass opacity** sets how much of
+the model shows through its panels, **Gloss** how strong its sheen and glossy buttons are, and
+**Menu opacity** how solid its menus, popups and notifications are, so they stay readable over
+busy panels, **Menu shadow** how deep a shadow they cast, and **Text shadow** how strong the
+halo behind text on the glass is, so it reads over whatever shows through: dark behind light text,
+a light glow behind dark text, from none to a strong glow.
+Each ribbon tab (Model, Surface, Assemble, Insert, Inspect, Manage, View, Sheet Metal,
+Weldments, Sketch, and the Mesh, Form and Render workspaces) can have a colour of your own for
+its pill, its line and its soft selections; the title bar and workspace buttons keep the
+theme's colours. **Icons follow their tab's colour** colours the shaded faces of the icons on a
+tab and its drop-downs to match, keeping the red of constraints and the orange of construction.
+Glass themes mark the active tab with a glass tile in its colour. **Background** chooses what
+the 3D view's background is: a **Gradient**, a **Solid colour**, a built-in **Pattern**
+(Aurora: soft rays and glowing ribbons drawn in the background's colours) or a **Picture** of
+your own (PNG or JPEG). A pattern or picture is veiled softly in the middle of the view, so it
+never competes with the model you're working on. With **Light follows the pointer** (on by
+default) the glass's light streaks and the pattern drift gently with the pointer. **Background top** and
+**Background bottom** set the 3D view's background gradient (also the start page's, in a glass
+theme); **Background follows the active tab** makes it a gradient of the colour of the tab or
+workspace you open, as light as the background's own, shifting gently between tabs, while the
+rest of the interface keeps its colours. **Background strength** sets how far the background goes
+from the theme's own towards those colours, and **Even out strong colours** gives them the
+lightness of the theme's own background, so a deep colour doesn't overpower it.
+**Colours follow the time of day** takes the base colour and the background from the time on your
+computer's clock: deep indigo at night, rose at dawn, clear blues through the day, gold in the late
+afternoon and coral and purple at dusk, shifting gradually as the day goes on. A strip under it
+shows the day's colours and where the day is now.
+**Theme's own** puts each back.
+
 Interface › **Theme** lists Dark, Light and System (follows the operating system), the built-in
 themes and any themes you have imported. A choice applies at once. Under the themes, **Viewport** draws the 3D view in the Light or Dark theme's colours whatever the window uses, for example the model on a light view in a dark window (**Follow theme**, the default, keeps the theme's own). **Logo** draws the SolidCraft logo at the top left in shades of the theme's accent instead of the theme's logo colours. The built-in themes are Gruvbox
 (dark and light, each in hard, normal and soft contrast), SolidCraft 95, Platinum 9, Cupertino,
 Green Phosphor, Amber Phosphor, Blueprint, One Dark, Tokyo Night, Solarized Light, Nord, High
 Contrast, Graphite, Nosferatu, Catppuccin Mocha, Okibi and Akari (dark and light, from the
 [Okibi design system](https://kaievns.github.io/okibi-akiri-design-system-spec/)), Clay and
-Clay Dark (warm ivory paper and warm charcoal, with a terracotta accent and rounded corners), and
+Clay Dark (warm ivory paper and warm charcoal, with a terracotta accent and rounded corners),
+Frutiger Aero (sky blue and aqua glass that shows the model through its panels, a glass title
+bar, glossy buttons, bubble icons, grass-green sketching, a sky-to-mint view and a navigation
+bar that stays shown), and
 1-bit and 1-bit Dark (pure black and white with square corners: black on white, or white on
 black, with selections drawn inverted).
+
+To share a theme, **Export…** saves it as a theme package, a `.zip` holding `theme.json` and,
+for a theme with its own icons, an `icons` folder of `<icon id>.svg` drawings; choose a `.json`
+name to save the theme file alone. **Import…** installs either, and turns it on. Exporting the
+theme on now includes your own adjustments (below), so whoever installs it sees what you see.
 
 A theme is a small JSON file that starts from the Dark or Light palette and changes any of its
 colours and corner radii by name:
@@ -218,7 +257,7 @@ styles form controls, and `sketch_mode_radius` styles sketch creation buttons. T
 these settings, with matching shapes across light and dark variants. Dock joins remain
 square, circular controls remain circular, and control sizes and spacing stay the same.
 Platinum 9, 1-bit, 1-bit Dark, and the phosphor themes use square corners, SolidCraft 95 uses subtle 3-point
-corners, Blueprint uses the standard radii, Cupertino uses softer corners, and Clay and Clay Dark use rounded corners. Other built-in
+corners, Blueprint uses the standard radii, Cupertino uses softer corners, Clay and Clay Dark use rounded corners, and Frutiger Aero uses crisp controls with gently rounded windows. Other built-in
 themes retain the defaults.
 
 Tab accents also have separate fill, small-text ink and tint keys. Sketch uses
@@ -314,7 +353,51 @@ SolidCraft 95 also defines optional `borders.bevel`: a per-band `width` and the
 for raised panels/buttons, recessed fields and reversed pressed-button lighting.
 Themes that omit this setting keep their existing flat borders.
 
+Frutiger Aero defines optional `borders.glass`: what floats over the 3D view (floating panels,
+windows, menus, popups, notifications and the navigation controls) lets the model show through,
+with a sheen fading down from each surface's top edge. It takes `opacity` (0.3 to 1: how much
+of a surface's own colour covers the view), the `sheen` colour at the top edge, and
+`sheen_height` (0 to 128 points). Docked panels and the application bar stay opaque. With
+`bubbles: true`, the ribbon's commands and the navigation bar's icon buttons sit on glossy
+bubbles tinted with the tab's colour, with a glass highlight over the icon; they brighten
+under the pointer and fill when pressed or on. Themes that omit this setting keep opaque surfaces and flat buttons.
+
 Theme files may also set `icon_palette`: opaque colours for SVG display roles,
 and three-colour pale/medium/strong ramps for Solid, Surface, Mesh, Form, Sketch,
 constraints and construction. These settings colour the existing command artwork
 without changing its shapes. Omitted roles keep the default light/dark palette.
+
+A theme can also arrange the interface with an optional `layout` object, made of sections:
+
+```json
+"layout": {
+  "ribbon": {"panels": {"MODEL/CREATE": ["solid.extrude", "solid.revolve", "solid.hole"]}},
+  "preferences": {"ribbon_labels": false, "dialog_place": "left_column", "layout": "compact"},
+  "icons": {"remap": {"fillet": "chamfer"}}
+}
+```
+
+- `ribbon` sets the buttons of ribbon panels, named `TAB/PANEL`, in order. A panel the theme
+  leaves out keeps its own buttons. Your own changes (Customize Toolbar, dragging buttons) apply
+  on top of the theme's, and Reset Toolbar goes back to the theme's buttons.
+- `preferences` sets `layout` (floating or compact panels), `dialog_place`, `navigation_bar` and
+  `ribbon_labels`, with the values the preferences file uses. They are set when you turn the
+  theme on, and you can still change them; turning the theme off gives back the values you had
+  before.
+- `tabs` gives ribbon tabs the theme's own colours: `{"colors": {"SKETCH": "#2e9e3e"}}`. Your
+  own tab colours win over the theme's.
+- `icons` changes the icons. `remap` draws an icon id as another SolidCraft icon (ids to ids).
+  `pack` gives icon ids the theme's own drawings: `{"extrude": "<svg viewBox=\"0 0 64 64\">…</svg>"}`,
+  in the same SVG subset and palette colours as SolidCraft's icons (see
+  `assets/icons/ui/STYLE_GUIDE.md`), so the theme's icon palette and the colour vision modes
+  still colour them. Each drawing is at most 64 KiB and the whole theme 256 KiB. A pack drawing
+  wins over a remap of the same id. Built-in themes use SolidCraft's own icons; use your own
+  artwork, or artwork whose licence lets you, in a pack.
+
+Exporting the theme on now shares the look you see: your base colour and glass sliders are
+baked into its colours and glass, and your tab colours and tab colour options go into its
+`layout`, so whoever imports it gets the same look.
+
+A section or setting that this version doesn't know is kept in the theme and named when you
+import it, never refused, so a theme made for a newer SolidCraft still imports. Values it does
+know are checked, as the rest of the theme file is.

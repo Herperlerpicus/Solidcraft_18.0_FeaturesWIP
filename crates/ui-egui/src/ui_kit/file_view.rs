@@ -1,7 +1,7 @@
 //! File/start presentation; callers retain commands, caches and recovery ownership.
 use super::{metrics::dimension, text::paint_text};
 use crate::theme::Tokens;
-use egui::{Align2, FontId, InnerResponse, Rect, Response, Sense, Stroke, TextureId, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, FontId, InnerResponse, Rect, Response, Sense, Stroke, TextureId, Ui, Vec2, pos2, vec2};
 
 pub(crate) struct RecoveryMessage<'a> {
     pub title: &'a str,
@@ -37,7 +37,20 @@ impl FileView {
         super::Container::new(ui.ctx(), super::Surface::Viewport)
             .central()
             .frame(super::Container::new(ui.ctx(), super::Surface::Viewport).edge_frame(Tokens::get().file_background))
-            .show(ui, add)
+            .show(ui, |ui| {
+                // A glass theme's start page is its sky (lightened towards the page, for the
+                // dim text on it) with light across its top; its cards and rail are glass.
+                let t = Tokens::get();
+                if let Some(glass) = t.borders.glass {
+                    let rect = ui.max_rect();
+                    // The view's background (gradient, colour, pattern or picture), washed halfway
+                    // towards the page's colour so the page's text reads on it.
+                    crate::backdrop::paint(ui.painter(), rect, t.viewport_top, t.viewport_bottom, crate::backdrop::Place::Page);
+                    ui.painter().rect_filled(rect, 0.0, t.file_background.gamma_multiply(0.5));
+                    glass.paint_streaks(ui.painter(), Rect::from_min_size(rect.min, vec2(rect.width(), rect.height().min(t.space_24 * 6.0))));
+                }
+                add(ui)
+            })
     }
 
     pub(crate) fn content<R>(ui: &mut Ui, narrow: bool, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
@@ -99,7 +112,7 @@ impl FileView {
 
     pub(crate) fn recent_list<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
         let t = Tokens::get();
-        egui::Frame::NONE.fill(t.file_surface).stroke(t.tertiary_border(t.file_border)).corner_radius(t.radius_xl).show(ui, |ui| {
+        egui::Frame::NONE.fill(glassy(t.file_surface)).stroke(t.tertiary_border(t.file_border)).corner_radius(t.radius_xl).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let key = ui.id().with("file_recent_index");
             ui.ctx().data_mut(|data| data.insert_temp(key, 0_usize));
@@ -133,14 +146,24 @@ impl FileView {
     pub(crate) fn rail<R>(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
             ui.set_clip_rect(ui.clip_rect().intersect(rect));
-            ui.painter().rect_filled(rect, 0, Tokens::get().file_rail);
+            let t = Tokens::get();
+            ui.painter().rect_filled(rect, 0, glassy(t.file_rail));
+            // A glass rail catches the light like the theme's other glass.
+            if let Some(glass) = t.borders.glass {
+                if let Some(sheen) = glass.sheen_mesh(rect, 0u8) {
+                    ui.painter().add(sheen);
+                }
+                glass.paint_streaks(ui.painter(), rect);
+            }
             Self::navigation(ui, add).inner
         })
     }
 
     pub(crate) fn navigation<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
         let t = Tokens::get();
-        egui::Frame::NONE.fill(t.file_rail).inner_margin(egui::Margin::symmetric(t.space_10 as i8, t.space_14 as i8)).show(ui, |ui| {
+        // In a glass theme the rail under it is the glass; another fill would cloud it.
+        let fill = if t.borders.glass.is_some() { Color32::TRANSPARENT } else { t.file_rail };
+        egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(t.space_10 as i8, t.space_14 as i8)).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = t.space_2;
             add(ui)
         })
@@ -410,10 +433,22 @@ fn card(ui: &Ui, rect: Rect, response: &Response, primary: bool) {
     ui.painter().rect(
         rect,
         t.radius_xl,
-        fill,
+        glassy(fill),
         if primary || response.has_focus() { Stroke::new(if primary { 1.5 } else { 1.0 }, border) } else { t.tertiary_border(border) },
         egui::StrokeKind::Inside,
     );
+    // A glass card catches the light like the theme's other glass.
+    if let Some(glass) = t.borders.glass {
+        if let Some(sheen) = glass.sheen_mesh(rect.shrink(1.0), t.radius_xl) {
+            ui.painter().add(sheen);
+        }
+        glass.paint_streaks(ui.painter(), rect.shrink(t.space_2));
+    }
+}
+
+/// A start page surface's fill: glass in a glass theme, as the panels over the 3D view are.
+fn glassy(fill: Color32) -> Color32 {
+    Tokens::get().borders.glass.map_or(fill, |glass| glass.fill(fill))
 }
 
 fn thumbnail(ui: &Ui, rect: Rect, texture: Option<(TextureId, Vec2)>) {
@@ -435,7 +470,7 @@ fn recovery_panel(
     banner: bool,
 ) -> (Response, Option<Response>) {
     let t = Tokens::get();
-    let fill = if banner { t.file_recovery } else { t.file_surface };
+    let fill = if banner { t.file_recovery } else { glassy(t.file_surface) };
     let border = if banner { t.file_recovery_border } else { t.file_border };
     egui::Frame::NONE
         .fill(fill)

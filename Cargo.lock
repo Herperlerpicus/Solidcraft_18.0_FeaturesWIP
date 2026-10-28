@@ -4427,6 +4427,7 @@ name = "solidcraft-ui-egui"
 version = "0.26.0"
 dependencies = [
  "arboard",
+ "chrono",
  "egui",
  "egui-wgpu",
  "image",
